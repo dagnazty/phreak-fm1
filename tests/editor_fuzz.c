@@ -560,6 +560,7 @@ static void boot(void)
         track_defaults_steps(t);
     }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                               /* D2, D3 as main.c sets them */
     song.sel = 0;
     autosave_resume();
     song.g[G_SYNC] = (int16_t)lights_sync; song.g[G_MIDI] = (int16_t)lights_mout; song.g[G_ROUTE] = (int16_t)lights_min;

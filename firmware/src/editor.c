@@ -373,6 +373,8 @@ UI_SMALL static void ed_sync(void)                                /* main loop *
 static const param_desc_t *ed_tdesc(const track_t *t, uint32_t id)   /* the static ones: an engine's */
 {                                                                     /* desc hook is the device display only */
     if(is_drum(t) && id==P_E0) return &DRUM_KIT_DESC;
+    if (is_drum(t) && drum_snd_desc(id))              /* (PHREAK 1.1) the USR kit sound's slots (drums.c DS_*) */
+        return drum_snd_desc(id);
     if (id >= P_E0 && id <= P_E7)
         return &ENGINES[t->eng_req % NENGINES]->edit[id - P_E0];
     return &TP[id];
@@ -392,7 +394,7 @@ UI_SMALL static const param_desc_t *ed_desc(uint32_t scope, uint32_t id, int16_t
 }
 
 /* ---- v6: backup / restore (web/EDITOR_PROTOCOL.md). Objects: 0 the working project, 1 the settings
- * (colours, calibration, the song order, the lights, SYNC), 2..5 the projects A..D, 6..7 the user preset
+ * (colours, calibration, the song order, the lights, SYNC), 2..5 the projects A..D (12..15: E..H), 6..7 the user preset
  * banks, 8 the FM6 patch bank (v9), 32..34 the user sample slots USR1..3 (read only here: restored with
  * SMP_BEGIN / WRITE / END).
  * LIST takes a snapshot of the working project and the settings; GET reads 1..256 bytes of an object.
@@ -423,10 +425,11 @@ UI_SMALL static const uint8_t *ed_bk_obj(uint32_t id, uint32_t *len)   /* 0 = no
         *len = sizeof ed_bk_set;
         return (const uint8_t *)&ed_bk_set;
     }
-    if (id >= 2u && id <= 5u) {
-        if (project_used(id - 2u))
-            *len = sizeof proj_slot[0];
-        return (const uint8_t *)&proj_slot[id - 2u];
+    if ((id >= 2u && id <= 5u) || (id >= 12u && id <= 15u)) {   /* (12..15 the sections E..H) */
+        uint32_t s = id <= 5u ? id - 2u : id - 8u;
+        if (project_used(s))
+            *len = sizeof(project_t);
+        return (const uint8_t *)proj_sec(s);
     }
     if (id == 6u || id == 7u) {                           /* a user preset bank, read where it is (upreset.c) */
         const up_bank_t *bk = up_bank_xip[id - 6u];
@@ -466,7 +469,7 @@ UI_SMALL static const uint8_t *ed_bk_obj(uint32_t id, uint32_t *len)   /* 0 = no
     }
     return 0;
 }
-static const uint8_t ED_BK_IDS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 32, 33, 34, 35};   /* 11: your theme (2.7) */   /* 35: USR4 (2.4), 9: SYN kits (2.5),
+static const uint8_t ED_BK_IDS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 32, 33, 34, 35};   /* 12..15: E..H */   /* 11: your theme (2.7) */   /* 35: USR4 (2.4), 9: SYN kits (2.5),
                                                                                       * 10: MIDI LEARN (2.6) */
 
 /* a flash erase silences the audio for ~50 ms and stalls USB: only while stopped (as the panel) */
@@ -480,8 +483,8 @@ UI_SMALL static uint32_t ed_bk_commit(void)
         return 2;
     if (id == 1u)
         return settings_restore(raw, n);
-    if (id <= 5u)
-        return project_restore(id == 0u ? 4u : id - 2u, raw, n);
+    if (id <= 5u || (id >= 12u && id <= 15u))
+        return project_restore(id == 0u ? PROJ_WORKING : id <= 5u ? id - 2u : id - 8u, raw, n);
     if (id == 6u || id == 7u) {                           /* a user preset bank (n 0: empty) */
         const up_bank_t *b = (const up_bank_t *)raw;
         if (ed_flash_busy())
@@ -611,7 +614,7 @@ UI_SMALL static int ed_backup(uint32_t cmd, const uint8_t *a, uint32_t na)   /* 
         rc = 1;
         if (!flash_ok) {
             rc = 4;
-        } else if (op == 0u && na == 12u && (id <= 11u)) {  /* begin: id, length (5), CRC-32 (5) */
+        } else if (op == 0u && na == 12u && (id <= 15u)) {  /* begin: id, length (5), CRC-32 (5); 12..15: E..H */
             len = ed_bk_r32(a + 2);
             if (id >= 2u || len) {                        /* (the working project and the settings are never empty) */
                 if (len <= sizeof proj_tmp) {
@@ -707,6 +710,7 @@ UI_SMALL static void ed_handle(const uint8_t *f, uint32_t n)   /* f: the bytes b
             ed_str(ENGINES[i]->name, 8);
         ed_b(NTRK);                                       /* v3 */
         ed_b(ED_PROTO);                                   /* v5..: the protocol version (9: FM6 patches, 10: SYN kits) */
+        ed_b(NSECT);                                      /* the song's sections (8: A..H; SLOOP sends none: 4) */
         break;
     case ED_GET:
     case ED_SET:
@@ -774,23 +778,23 @@ UI_SMALL static void ed_handle(const uint8_t *f, uint32_t n)   /* f: the bytes b
         ed_b(ed_eng(TSEL));
         ed_b(TSEL->preset);
         break;
-    case ED_PROJECT:                                       /* 0 = load, 1 = save, 2 = query; slot 0..3 */
+    case ED_PROJECT:                                       /* 0 = load, 1 = save, 2 = query; slot 0..7 (A..H) */
         if (na < 2u || a[0] > 2u)
             return;
 #if FELUCCA_ARRANGER
         if (a[0] < 2u && (song.playing || transport_req)) {
-            ed_b(a[0]); ed_b(a[1] & 3u); ed_b(project_used(a[1] & 3u));
+            ed_b(a[0]); ed_b(a[1] & 7u); ed_b(project_used(a[1] & 7u));
             ed_b(1);                                  /* optional status: transport busy */
             break;
         }
 #endif
         if (a[0] == 1u)
-            project_save(a[1] & 3u);
+            project_save(a[1] & 7u);
         else if (a[0] == 0u)
-            project_load(a[1] & 3u);
+            project_load(a[1] & 7u);
         ed_b(a[0]);
-        ed_b(a[1] & 3u);
-        ed_b(project_used(a[1] & 3u));
+        ed_b(a[1] & 7u);
+        ed_b(project_used(a[1] & 7u));
         break;
     case ED_NAMES:                                         /* preset names of an engine */
         if (na < 1u || a[0] >= NENGINES)
@@ -975,7 +979,7 @@ UI_SMALL static void ed_handle(const uint8_t *f, uint32_t n)   /* f: the bytes b
         for (i = 0; i < NTRK; i++) {
             ed_b(ed_eng(&trk[i]));
             ed_b(trk[i].preset);
-            ed_v(i == TRK_DRUM ? song.g[G_DRLVL] : trk[i].p[P_LEVEL]);
+            ed_v(i == TRK_DRUM ? (*drum_lvl_ptr()) : trk[i].p[P_LEVEL]);
             ed_b(trk[i].p[P_MUTE] != 0);
             ed_b((song.rec >> i) & 1u);
         }
@@ -987,7 +991,7 @@ UI_SMALL static void ed_handle(const uint8_t *f, uint32_t n)   /* f: the bytes b
         if (na < 1u || a[0] >= NTRK)
             return;
         t = &trk[a[0]];
-        lv = a[0] == TRK_DRUM ? &song.g[G_DRLVL] : &t->p[P_LEVEL];
+        lv = a[0] == TRK_DRUM ? drum_lvl_ptr() : &t->p[P_LEVEL];
         if (na >= 4u) {
             *lv = (int16_t)clamp(ed_rv(a + 1), 0, 127);
             t->p[P_MUTE] = (int16_t)(a[3] ? 1 : 0);

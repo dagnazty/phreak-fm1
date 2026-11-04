@@ -173,6 +173,7 @@ int main(int argc, char **argv)
     host_tracks_init();
     for (i = 0; i < NPART; i++) { set_engine_of(&trk[i], TRK_DEF[i][0]); apply_preset_to(&trk[i], TRK_DEF[i][1]); trk[i].engine = trk[i].eng_req; }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                               /* D2, D3 as main.c sets them */
     sloop_splash(); ppm("page-splash");
     ui.menu = 2; ui.force = 1; frame(); ppm("page-about"); ui.menu = 0;
     go_home(); ui.force = 1; frame(); ppm("page-tracks");
@@ -1896,9 +1897,9 @@ int main(int argc, char **argv)
         song.playing = 0; transport_req = 0; song.rec = 0; rec_wait = 0; arrangement_enabled = 0; live_req = -1;
         live(0, 0, 0, 0);
         bpm = (int)(lv_out[3] | lv_out[4] << 7) - 8192;
-        ok &= lv_n == 50u && lv_out[0] == 0 && !(lv_out[1] & 1u) && bpm == song.g[G_BPM] && lv_out[12] == song.sel && lv_out[32] == 0u
+        ok &= lv_n == 51u && lv_out[50] == ((arrangement_ready() >> 4) & 15u) && lv_out[0] == 0 && !(lv_out[1] & 1u) && bpm == song.g[G_BPM] && lv_out[12] == song.sel && lv_out[32] == 0u
               && lv_out[34] == (8u | 4u << 4);
-        check(ok, "LIVE (2.7): the state, 50 bytes (flags, BPM, sections, mix, punch, song, 4 x step / length / meter, master, throws, drum tune / decay)");
+        check(ok, "LIVE (2.7): the state, 51 bytes (flags, BPM, sections, mix, punch, song, 4 x step / length / meter, master, throws, drum tune / decay; the sections E..H stored)");
         live(1, 1, 0, 0); ok = transport_req == 1u; frames(30);
         live(0, 0, 0, 0); ok &= song.playing && (lv_out[1] & 1u) && lv_out[20] < trk_len(&trk[0]) && lv_out[21] == trk_len(&trk[0]);
         check(ok, "LIVE: PLAY plays; the reply says so");

@@ -34,7 +34,7 @@ const E = vm.runInNewContext(proto + `
    CHOP, chopNovelty, chopHits, chopSnap, chopGrid, chopEqual, chopList, chopPick, chopFit, chopZones, wavFile, zipStore, crc32,
    UP, bank, capturePatch, auditionPatch, startWatch, libraryFile, readLibraryFile, paramKeys, patternFromSteps, stepsFromPattern, upName,
    mixer, GM_DRUM, drumName, parseNotes, fmtValue, F, DRUM_LANES, LV_NAMES, emptyDrum, lockable, MICRO, FC, fillGet, fillSet, pack7, unpack7,
-   loudDb, matchGains, withGain, LEVEL_MIN, backupCapture, backupRestore, backupObjects, b64enc, b64dec, FM6, KIT, kitPad, kitZones, kitLen, kitBytes, kitFit, kitSplit, kitLaneOf, kitPlace, zipRead, ROLL, SMF, ARR, mockSettings, fm6CartWrite, fm6CartPreset, fm6CartSlots, fm6CartPresets, DSYN, DSYN_MOCK_NAMES, DSYN_MOCK_KITS, SetGate, bkProjFormat, bkDevFormat, bkFwAtLeast, THEME, FM1_PORT_ED: FM1_PORT, fm1Ports, LOOP, LIVE, LVX, SONGF, songCapture, songLoad, songObjects })`,
+   loudDb, matchGains, withGain, LEVEL_MIN, backupCapture, backupRestore, backupObjects, b64enc, b64dec, FM6, KIT, kitPad, kitZones, kitLen, kitBytes, kitFit, kitSplit, kitLaneOf, kitPlace, zipRead, ROLL, SMF, ARR, mockSettings, fm6CartWrite, fm6CartPreset, fm6CartSlots, fm6CartPresets, DSYN, DSYN_MOCK_NAMES, DSYN_MOCK_KITS, SetGate, bkProjFormat, bkDevFormat, bkFwAtLeast, THEME, FM1_PORT_ED: FM1_PORT, fm1Ports, LOOP, LIVE, LVX, SONGF, SECL, secCount, secObj, secOfObj, songCapture, songLoad, songObjects })`,
 { setTimeout, clearTimeout, setInterval, clearInterval, console, TextEncoder, TextDecoder, Blob, Response, DecompressionStream });
 
 async function editorMock() {
@@ -606,8 +606,8 @@ async function editorBackup() {
   const info = E.parse[C.INFO](await rq(E.req.info()));
   ok(info.proto >= 6, "backup: INFO protocol v6 or later");
   const ec = readFileSync(join(HERE, "../firmware/src/editor.c"), "utf8");
-  ok(/ED_BK_IDS\[\] = \{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 32, 33, 34, 35\}/.test(ec) && E.backupObjects && [10, 11].every((id) => ec.includes(`id == ${id}u`)),
-    "backup: the object ids == editor.c ED_BK_IDS (35: USR4, 9: SYN kits, 10: MIDI LEARN, 11: theme)");
+  ok(/ED_BK_IDS\[\] = \{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 32, 33, 34, 35\}/.test(ec) && E.backupObjects && [10, 11].every((id) => ec.includes(`id == ${id}u`)),
+    "backup: the object ids == editor.c ED_BK_IDS (35: USR4, 9: SYN kits, 10: MIDI LEARN, 11: theme, 12..15: E..H)");
   await rq(E.req.upStore(3, "BACKUP ME"));
   await rq(E.req.project(1, 2), { timeout: 4000, retries: 0 });
   const s = Int16Array.from({ length: 3000 }, (_, i) => Math.round(8000 * Math.sin(i / 7)));
@@ -855,12 +855,12 @@ await (async () => {
     && [hz(0)[0], hz(1)[0], hz(2)[0]].join() === "36,38,46",
     "drum kit: one zone per pad, lo = hi = root = the lane's note (drums.c LANE_NOTE: KICK 36, SNARE 38, OPEN HAT 46)");
   const big = Array(16).fill(null).map((_, l) => ({ s: s(30000), fname: l + ".wav", tune: 0, gain: 0, len: 0 }));
-  ok(E.kitBytes(big) > 81408 && E.kitFit(big, 81408 - 64) && E.kitBytes(big) <= 81408 - 64 && E.kitBytes(big) > 81408 - 64 - 64,
+  ok(E.kitBytes(big) > 69120 && E.kitFit(big, 69120 - 64) && E.kitBytes(big) <= 69120 - 64 && E.kitBytes(big) > 69120 - 64 - 64,
     "drum kit: FIT shortens the longest pads to fill the slot, no more");
   {   /* KIT USR3+4: a big kit shared out over two slots, each pad whole in one */
-    const R = 81408 - 64, mk = (secs) => ({ s: s(Math.round(secs * 22050)), fname: "x.wav", tune: 0, gain: 0, len: 0 });
+    const R = 69120 - 64, mk = (secs) => ({ s: s(Math.round(secs * 22050)), fname: "x.wav", tune: 0, gain: 0, len: 0 });
     const kit = Array(16).fill(null);
-    [0.6, 0.3, 0.3, 0.15, 2.5, 1.0, 0.2, 0.2, 0.3, 0.6, 0.6, 3.0, 2.5, 0.3, 0.4, 0.3].forEach((x, l) => { kit[l] = mk(x); });
+    [0.6, 0.3, 0.3, 0.15, 2.0, 1.0, 0.2, 0.2, 0.3, 0.6, 0.6, 2.4, 2.0, 0.3, 0.4, 0.3]   /* (68 KiB slots) */.forEach((x, l) => { kit[l] = mk(x); });
     const tot = E.kitBytes(kit), sp = E.kitSplit(kit, R);
     const load = (ls) => ls.reduce((a, l) => a + ((E.kitLen(kit[l]) + 1) >> 1), 0);
     ok(tot > R && tot <= 2 * R && sp && sp[0].length + sp[1].length === 16 && load(sp[0]) <= R && load(sp[1]) <= R
@@ -994,8 +994,8 @@ sys.stdout.buffer.write(hd+t1+b'MTrk'+struct.pack('>I',len(tr))+tr)`);
   const enc = ARR.encode(sb, { loop: true, entries: ARR.expand(rows) });
   ok(js(ARR.decode(enc)) === js({ loop: true, entries: ARR.expand(rows) }) && enc.subarray(0, 48).every((v, i) => v === sb[i]) && enc.subarray(84).every((v, i) => v === sb[84 + i]),
     "song: encode keeps the rest of the settings");
-  ok(!ARR.valid({ entries: [] }) && !ARR.valid({ entries: Array(17).fill({ scene: 0, bars: 1 }) }) && !ARR.valid({ entries: [{ scene: 4, bars: 1 }] })
-    && !ARR.valid({ entries: [{ scene: 0, bars: 65 }] }) && ARR.valid({ entries: Array(16).fill({ scene: 3, bars: 64 }) }), "song: valid == arranger.h arr_valid (1..16 entries, A..D, 1..64 bars)");
+  ok(!ARR.valid({ entries: [] }) && !ARR.valid({ entries: Array(17).fill({ scene: 0, bars: 1 }) }) && !ARR.valid({ entries: [{ scene: 8, bars: 1 }] })
+    && !ARR.valid({ entries: [{ scene: 0, bars: 65 }] }) && ARR.valid({ entries: Array(16).fill({ scene: 7, bars: 64 }) }), "song: valid == arranger.h arr_valid (1..16 entries, A..H (PHREAK), 1..64 bars)");
   const pc = readFileSync(join(HERE, "../firmware/src/project.c"), "utf8"), ah = readFileSync(join(HERE, "../firmware/src/arranger.h"), "utf8");
   const pt = (/typedef struct \{([^}]*)\} persist_t;/.exec(pc) || [, ""])[1];
   ok(/PERSIST_MAGIC 0x50455233u/.test(pc) && /arr_config_t arrangement;/.test(pt) && /ARR_STEPS 16u/.test(ah)
@@ -1044,8 +1044,8 @@ async function editorDsyn() {
   if (hdr) {
     const kits = [...hdr.matchAll(/\{"([^"]*)", "[^"]*", (0x[0-9A-Fa-f]+|\d+), \{([\s\S]*?)\}\},/g)];
     const bytes = kits.flatMap((k) => [Number(k[2]), ...[...k[3].matchAll(/\{([^{}]*)\},/g)].flatMap((r) => r[1].split(",").map((x) => +x & 255))]);
-    ok(kits.length === 32 && js(kits.map((k) => k[1])) === js(E.DSYN_MOCK_NAMES) && js(Array.from(raw)) === js(bytes),
-      "dsyn: the mock's 32 kits == build/gen/felucca_drumkits.h");
+    ok(kits.length === 35 && js(kits.map((k) => k[1])) === js(E.DSYN_MOCK_NAMES) && js(Array.from(raw)) === js(bytes),
+      "dsyn: the mock's 35 kits (+ RAGE PLUGG MEMPHIS) == build/gen/felucca_drumkits.h");
   }
   /* viewing never changes a value: decode / encode give every factory sound back */
   let same = true;
@@ -1074,9 +1074,9 @@ async function editorDsyn() {
   let L = E.parse[C.DSYN_LIST](await rq(E.req.dsynList()));
   const g0 = E.parse[C.DSYN_GET](await rq(E.req.dsynGet(DSYN.USER)));
   const f5 = E.parse[C.DSYN_GET](await rq(E.req.dsynGet(5)));
-  ok(L.factory === 32 && L.user === 4 && L.stored && L.names[0] === "808" && L.kits.map((k) => k.name).join() === "808,909,TRAP,TECHNO"
+  ok(L.factory === E.DSYN_MOCK_NAMES.length && L.user === 4 && L.stored && L.names[0] === "808" && L.kits.map((k) => k.name).join() === "808,909,TRAP,TECHNO"
     && g0.rc === 0 && g0.name === "808" && g0.src === 0 && js(g0.sounds.map((x) => Array.from(x))) === js(kit.sounds.map((x) => Array.from(x)))
-    && f5.rc === 0 && f5.name === "TRAP", "dsyn: LIST (32 + 4, stored), GET SYN1 = the 808, GET a factory kit");
+    && f5.rc === 0 && f5.name === "TRAP", "dsyn: LIST (the factory kits (35) + 4, stored), GET SYN1 = the 808, GET a factory kit");
   const o = DSYN.decode(g0.sounds[0]); o.decay = 20; o.wave = 4;
   const p1 = E.parse[C.DSYN_PUT](await rq(E.req.dsynSound(0, 0, DSYN.encode(o))));
   const p2 = E.parse[C.DSYN_PUT](await rq(E.req.dsynHead(0, "BOOM", 0x10, 0)));
@@ -1339,6 +1339,34 @@ function editorLivePro() {
 }
 
 /* ------------------------------------- SLOOP 2.7: a song as one file (the LIVE playlist) --- */
+/* ------------------------------------- PHREAK: the song's sections A..H --- */
+async function editorPhreakSections() {
+  const C = E.CMD;
+  const { m, rq, done } = attachMock({ phreak: true, watchMs: 1000 });
+  const info = E.parse[C.INFO](await rq(E.req.info()));
+  ok(E.secCount(info) === 8 && info.nsect === 8 && E.secCount({ version: "FELUCCA SLOOP 2.6", nsect: 4 }) === 4 && E.SECL[7] === "H"
+    && [0, 3, 4, 7].map(E.secObj).join() === "2,5,12,15" && [2, 5, 12, 15].map(E.secOfObj).join() === "0,3,4,7",
+    "sections: 8 when INFO says so (backup objects 12..15 = E..H), 4 on SLOOP");
+  const st = m.state;
+  const p = await rq(E.req.project(1, 6), { timeout: 4000, retries: 0 });
+  const q = E.parse[C.PROJECT](await rq(E.req.project(2, 6)));
+  ok(E.parse[C.PROJECT](p).slot === 6 && q.used && !!st.slots[6] && !st.slots[2], "phreak: PROJECT save / query of section G (slot 6)");
+  const s1 = E.parse[C.LIVE](await rq(E.req.live(E.LIVE.STORE_SEC, 4)));
+  ok(((s1.ready >> 4) & 15) === 0b0101 && !!st.slots[4], "phreak: LIVE op 13 stores E; the state's last byte: E..H stored (E, G)");
+  const A = await E.backupCapture(rq, info);
+  ok(A.objects.filter((o) => o.id >= 12 && o.id <= 15).map((o) => `${o.id}:${o.len > 0 ? 1 : 0}`).join() === "12:1,13:0,14:1,15:0",
+    "phreak: a backup carries E..H (objects 12..15; F, H empty)");
+  st.slots[4] = st.slots[6] = null;
+  await E.backupRestore(rq, JSON.parse(JSON.stringify(A)));
+  ok(!!st.slots[4] && !!st.slots[6] && !st.slots[5], "phreak: restore puts E and G back");
+  const song = await E.songCapture(rq, info, "eight");
+  ok(song.objects.map((o) => o.id).filter((id) => id >= 12).join() === "12,14", "phreak: a song file keeps E and G");
+  st.slots[4] = st.slots[6] = null; st.slots[7] = JSON.parse(JSON.stringify(st.slots[0]));
+  await E.songLoad(rq, song);
+  ok(!!st.slots[4] && !!st.slots[6] && !st.slots[7], "phreak: loading it writes E..H too (H emptied)");
+  done();
+}
+
 async function editorSongFile() {
   const { m, rq, done } = attachMock({ watchMs: 1000 });
   const info = E.parse[E.CMD.INFO](await rq(E.req.info()));
@@ -1606,7 +1634,7 @@ print(",".join(i.filename + ":" + str(i.file_size) for i in z.infolist()))`, zp)
   const fitted = many.map((c) => ({ ...c, end: Math.min(c.end, c.start + Lf) }));
   let built = null;
   try { built = E.buildSlot("LONG", E.chopZones(long, fitted, 60, 0)); } catch (e) { built = null; }
-  ok(Lf < R * 0.5 && Lf > R * 0.4 && built && built.data.length <= E.SMP.MAX_DATA && built.hdr[6] === 16,
+  ok(Lf < R * 0.5 && Lf > R * 0.35 && built && built.data.length <= E.SMP.MAX_DATA && built.hdr[6] === 16,
     `chop: Fit to slot: 16 x 0.5 s cut to ${(Lf / R).toFixed(3)} s each, the slot builds`);
   ok(E.chopFit([{ start: 0, end: 100 }, { start: 0, end: 300 }], 250) === 150, "chop: fit keeps short chops whole, cuts the long ones");
 }
@@ -1795,6 +1823,7 @@ await editorTheme();
 await editorLivePage();
 editorLivePro();
 await editorSongFile();
+await editorPhreakSections();
 editorTabs();
 editorIcons();
 samplesMatch();

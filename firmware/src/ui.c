@@ -3,7 +3,12 @@
 /* Felucca user interface. Four columns map to KNOB 1..4. Rendering is lazy:
  * every element remembers what it last drew and is redrawn only on change. */
 #ifndef FELUCCA_VERSION
-#define FELUCCA_VERSION "SLOOP 2.8.4"  /* the beat machine firmware for the FM-1 (based on Felucca) */
+#define FELUCCA_VERSION "SLOOP 2.8.4+"  /* the beat machine firmware for the FM-1 (based on Felucca); "+": with LOAD FROM
+                                       * USB, sections A..H, more 808s and trap kits (EXTRAS.md) */
+#endif
+#ifndef PHREAK_RELEASE
+#define PHREAK_RELEASE "DEV"            /* PHREAK's own number, on the boot screen and ABOUT (tools/build.py --release X.Y);
+                                       * FELUCCA_VERSION stays SLOOP's: the web editor reads it */
 #endif
 static void project_save(uint32_t slot);
 static void arrangement_save(void);
@@ -713,7 +718,9 @@ UI_SMALL static void select_engine(uint32_t e)
 enum { BK_BASS, BK_KEYS, BK_ORGAN, BK_PAD, BK_LEAD, BK_PLUCK, BK_STAB, BK_FX };
 static const char *const BANK_KIND[] = {"BASS", "KEYS", "ORGN", "PAD", "LEAD", "PLCK", "STAB", "FX"};
 static const struct { uint8_t kind, e; const char *name; } BANK[] = {
-    {BK_BASS, 0, "808 BOOM"}, {BK_BASS, 0, "808 DIRTY"}, {BK_BASS, 0, "808 SLIDE"}, {BK_BASS, 0, "SUB BASS"},
+    {BK_BASS, 0, "808 BOOM"}, {BK_BASS, 0, "808 DIRTY"}, {BK_BASS, 0, "808 SLIDE"},
+    {BK_BASS, 0, "808 LONG"}, {BK_BASS, 0, "808 PUNCH"}, {BK_BASS, 0, "808 GRIT"}, {BK_BASS, 0, "808 GLIDE"},
+    {BK_BASS, 0, "SUB BASS"},
     {BK_BASS, 0, "PLUGG BASS"}, {BK_BASS, 0, "REESE"}, {BK_BASS, 0, "WOBBLE"}, {BK_BASS, 0, "ACID 303"},
     {BK_BASS, 1, "FM BASS"}, {BK_BASS, 2, "CZ BASS"}, {BK_BASS, 6, "FAT BASS"}, {BK_BASS, 0, "FUNK BASS"},
     {BK_BASS, 5, "WOW BASS"}, {BK_BASS, 3, "GB BASS"}, {BK_BASS, 4, "UP BASS"}, {BK_BASS, 4, "DEEP BASS"},
@@ -1019,7 +1026,7 @@ UI_SMALL static const param_desc_t *home_param(uint32_t k, int16_t **vp)
     if (is_drum(TSEL)) {
         id = DRUM_HOME[k & 3u][1];
         if (DRUM_HOME[k & 3u][0]) {
-            *vp = &song.g[id];
+            *vp = id == G_DRLVL ? drum_lvl_ptr() : &song.g[id];   /* (the drum track shown: D1, D2, D3) */
             return &GP[id];
         }
         *vp = &TSEL->p[id];

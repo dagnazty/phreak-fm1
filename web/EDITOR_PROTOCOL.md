@@ -56,7 +56,7 @@ after an engine change.
 | 6 STEP_GET | index 0..NSTEP−1 | index, n (0..4 notes), note0..note3, time (0 NOTE, 1 TIE, 2 REST), flags (1 accent, 2 slide), vel, then (v5) lvl, hi, rat |
 | 7 STEP_SET | index, n, note0..3, time, flags, vel [, lvl, hi, rat (v5)] | same as STEP_GET (after the write). Without the v5 bytes the step's levels and ratchets become 0 |
 | 8 PRESET | engine, preset | engine, preset (applies the preset: sound, sends, arp; never the pattern, the mix or the key: `LEVEL PAN MUTE`, `LEN DIV SWG GATE`, `ROOT SCL QNT CHORD` stay) |
-| 9 PROJECT | op (0 load, 1 save, 2 query), slot 0..3 | op, slot, used (1/0). Save writes flash: allow ~2 s |
+| 9 PROJECT | op (0 load, 1 save, 2 query), slot 0..3 (PHREAK: 0..7, A..H) | op, slot, used (1/0). Save writes flash: allow ~2 s |
 
 The local Studio build may append status `1` to a PROJECT reply when playback
 prevents a load/save. No operation occurred; stop playback and try again.
@@ -117,7 +117,7 @@ An absent status byte retains the original reply format.
 **pack7:** groups of up to 7 bytes, each preceded by one byte holding their top bits
 (bit j = bit 7 of byte j).
 
-**User sample slot** (80 KiB each: USR1..USR3 at flash 0xA0000, 0xB4000, 0xC8000 and, from SLOOP 2.4, USR4 at
+**User sample slot** (68 KiB each, 80 up to SLOOP 2.8.4 (the last 12 KiB of each now keep the extra drum tracks D2, D3): USR1..USR3 at flash 0xA0000, 0xB4000, 0xC8000 and, from SLOOP 2.4, USR4 at
 0xE7000 — SMP_INFO says how many; SAMPLE / GRAIN sets USR1..USR4, the drum track's KIT USR1..USR4 and USR3+4; reference uploader
 `tools/fm1_sample_upload.py`, slot builder `sampleio.user_slot`; the editor's port of it is
 checked byte for byte by `web/test_web.mjs`): header at 0, ADPCM data at 512.
@@ -276,7 +276,7 @@ G_COUNT 45. An editor reads both from `INFO` and maps a patch file by its own co
 `INFO` ends with 6. Objects: **0** the working project (a `project_t`, as the autosave), **1** the settings
 (`persist_t`: colours, low cut, zoom, the panel calibration, the song order, the lights word: lights, SYNC,
 the REC screen's mode and start, USB AUDIO and, since 2.4, MIDI OUT = SEQ (bit 14) and IN = CLOCK (bit 15)),
-**2..5** the projects 1..4 (song sections A..D; length 0 = empty), **6..7** the user preset banks (`up_bank_t`,
+**2..5** the projects 1..4 (song sections A..D; length 0 = empty; PHREAK: **12..15** the sections E..H, the same), **6..7** the user preset banks (`up_bank_t`,
 16 records each; 0 = empty), **32..35** the user sample slots USR1..4 (35: SLOOP 2.4) (header + ADPCM data, as in flash; 0 =
 empty). Numbers are 5 × 7 bit (u35, LSB first); data is pack7.
 
@@ -442,6 +442,8 @@ device before 2.7 answers its begin with rc 5: the editor skips it. The editor's
 
 `INFO` ends with 12. Command **77**, `LIVE` (firmware `editor_live.c`), drives the editor's LIVE page: `op [args]`,
 and every reply is `op` followed by the live state. Each op runs the code of the FM-1's own buttons:
+
+(PHREAK) op **13** stores the loop into a section, 0..7 = A..H (SAVE + key 5..8, whatever bank key 15 left them in); the state ends with one more byte, the sections E..H stored (bit 0 = E). Chains (op 9) take sections 0..7.
 
 | op | args | does |
 | --- | --- | --- |

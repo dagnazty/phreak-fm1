@@ -123,6 +123,18 @@ int main(int argc, char **argv)
     transport_req = 2;
     for (k = 0; k < NTRK; k++) trk[k].p[P_AMODE] = 0;
     for (b = 0; b < 5u * FS / CTL; b++) mix_block(out, CTL);
+    /* then up to 25 s more while a synth voice still sounds: the random knob moves can leave an FM6 sound
+     * with a release of several seconds (seen: 5..10 s after an engine more changed the random stream); a voice that
+     * hangs is still one past 30 s */
+    for (b = 0; b < 25u * FS / CTL; b++) {
+        uint32_t a = 0;
+        for (k = 0; k < NPART; k++)
+            for (i = 0; i < NVOICE; i++)
+                a |= trk[k].v[i].active;
+        if (!a)
+            break;
+        mix_block(out, CTL);
+    }
     assert(!song.playing && !song.rec && !rec_wait && !ft_on);
     assert(punch.cur == -1);
     for (k = 0; k < NPART; k++)

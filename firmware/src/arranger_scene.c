@@ -4,7 +4,7 @@ static uint32_t arrangement_ready(void)
 {
     uint32_t i, ready = 0;
     for (i = 0; i < ARR_SCENES; i++)
-        if (proj_ok(&proj_slot[i])) ready |= 1u << i;
+        if (proj_ok(proj_sec(i))) ready |= 1u << i;
     return ready;
 }
 
@@ -12,7 +12,7 @@ static uint32_t arrangement_ready(void)
  * chain (seq.c chain_*) plays each of its sections this long */
 static uint32_t section_bars(uint32_t s)
 {
-    const project_t *p = &proj_slot[s & 3u];
+    const project_t *p = proj_sec(s);
     uint32_t k, bars = 1;
     if (!proj_ok(p))
         return 1;
@@ -40,7 +40,8 @@ static void arrangement_apply(uint32_t scene)
         t->arp_ch[0] = t->arp_ch[1] = t->arp_ch[2] = 0;
         t->rskip_lanes = 0;
     }
-    proj_apply(&proj_slot[scene], 0);
+    proj_apply(proj_sec(scene), 0);
+    xd_apply(xd_sec(scene));                      /* its D2, D3 (xdrums.c) */
     sync_reload = 1;
     ui.force = 1;
 }
@@ -52,6 +53,7 @@ static uint8_t song_kept;
 static void song_backup(void)                  /* (audio ISR: seq_start) */
 {
     proj_capture(&song_keep);
+    xd_capture(&xd_keep);
     song_kept = 1;
 }
 static void song_restore(void)                 /* (audio ISR: seq_stop) */
@@ -67,6 +69,7 @@ static void song_restore(void)                 /* (audio ISR: seq_stop) */
         trk[i].arp_ch[0] = trk[i].arp_ch[1] = trk[i].arp_ch[2] = 0;
     }
     proj_apply(&song_keep, 1);
+    xd_apply(&xd_keep);
     song.sel = (uint8_t)(song_keep.sel < NTRK ? song_keep.sel : 0u);
     sync_reload = 1;
     ui.force = 1;

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
 /* Projects: four slots in .noinit RAM (the song sections A..D), so they survive resets and UBOOT
- * entry. With FELUCCA_FLASH every save also goes to flash through storage.c, and an empty RAM slot
+ * entry (E..H too, in plain RAM, proj_sec). With FELUCCA_FLASH every save also goes to flash through storage.c, and an empty RAM slot
  * is filled from flash on load. The working project is also kept in flash by itself (autosave, when
  * the transport is stopped and nothing sounds) and comes back at power-on: SLOOP starts where you
  * left it.
@@ -151,6 +151,106 @@ _Static_assert(sizeof(project_v2_t) == 2552u && sizeof(project_v1_t) == 688u && 
                sizeof(project_v4_t) == 3112u && sizeof(project_v5_t) == 3840u, "formats 1 / 2 / 3 / 4 / 5 as they were stored");
 _Static_assert(sizeof(project_t) <= 3840u, "format 6 fits one flash object (storage.c ST_PAYLOAD_MAX)");
 project_t proj_slot[4] __attribute__((section(".noinit")));
+/* the sections E..H: in RAM (.noinit is full), filled from flash at boot (storage.c OBJ_SECT4.., the pool
+ * of five sectors); a warm reset loses only an E..H stored while playing and not yet written (sections_write) */
+static project_t proj_slot_eh[4];
+static inline project_t *proj_sec(uint32_t s) { s &= 7u; return s < 4u ? &proj_slot[s] : &proj_slot_eh[s - 4u]; }
+
+/* the extra drum tracks D2, D3 of a section (drums.c xd[], xdrums.c): kept apart from project_t (it is full), two
+ * sections to a flash object (storage.c OBJ_XD0.., the working project's in OBJ_XDW). A section without them (saved
+ * before, or restored from an editor backup) has D2, D3 empty */
+#define XD_MAGIC 0x31524458u                           /* "XDR1": PHREAK 0.9 .. 1.0, no USR kit sound (xd_ext_v1_t) */
+#define XD_MAGIC2 0x32524458u                          /* "XDR2" (PHREAK 1.1): with D2's and D3's USR kit sound */
+typedef struct {
+    int16_t p[XD_NP];                                  /* drums.c XD_P: kit, length, DIV, swing, mute, pan, level */
+    uint8_t rsv[2];
+    dstep_t dstep[NSTEP];
+    uint8_t mf[NSTEP];                                 /* each step's nudge (6 bits) | its fill condition << 6 (pt_set_mf) */
+} xd_trk_t;
+typedef struct {
+    uint32_t magic;
+    xd_trk_t d[NXD];                                   /* D2, D3 */
+} xd_ext_v1_t;
+typedef struct {
+    uint32_t magic;
+    xd_trk_t d[NXD];                                   /* D2, D3 */
+    int16_t q[NXD][XQ_N];                              /* (PHREAK 1.1) their USR kit sound (drums.c XQ_P) */
+} xd_ext_t;
+_Static_assert(2u * sizeof(xd_ext_t) <= 3840u, "two sections' D2 and D3 fit one flash object (storage.c ST_PAYLOAD_MAX)");
+static xd_ext_t xd_sec_lo[4];                                     /* A..D (a pair after another: one flash object) */
+static xd_ext_t xd_sec_hi[4];                                     /* E..H */
+static xd_ext_t xd_keep;                                         /* song mode: the loop's, put aside (arranger_scene.c) */
+static inline xd_ext_t *xd_sec(uint32_t s) { s &= 7u; return s < 4u ? &xd_sec_lo[s] : &xd_sec_hi[s - 4u]; }
+
+static void xd_capture(xd_ext_t *e)                    /* D2, D3 as they are now -> e */
+{
+    uint32_t d, i, k;
+    xd_ref_t r;
+    memset(e, 0, sizeof *e);
+    e->magic = XD_MAGIC2;
+    for (d = 1; d < 3u; d++) {
+        xd_trk_t *t = &e->d[d - 1u];
+        xd_ref(d, &r);
+        for (i = 0; i < XD_NP; i++)
+            t->p[i] = *r.p[i];
+        for (i = 0; i < XQ_N; i++)
+            e->q[d - 1u][i] = *xq_par(d, i);
+        memcpy(t->dstep, r.dstep, sizeof t->dstep);
+        for (k = 0; k < NSTEP; k++)
+            t->mf[k] = (uint8_t)(((uint32_t)r.micro[k] & 63u) | (((uint32_t)r.fill[k / 4u] >> (2u * (k % 4u))) & 3u) << 6);
+    }
+}
+
+/* (PHREAK 1.1) the range of a drum track's value id (the USR kit sound's slots: drums.c drum_snd_desc) */
+static const param_desc_t *drum_p_desc(uint32_t id)
+{
+    const param_desc_t *d = drum_snd_desc(id);
+    return d ? d : id == P_E0 ? &DRUM_KIT_DESC : &TP[id];
+}
+/* q (XQ_P's values) -> drum track d's USR kit sound, inside their ranges; no q: as new */
+static void xd_snd_apply(uint32_t d, const int16_t *q)
+{
+    static int16_t p[P_COUNT];
+    uint32_t i;
+    drum_snd_defaults(p);
+    for (i = 0; i < XQ_N; i++)
+        *xq_par(d, i) = q ? (int16_t)clamp(q[i], drum_p_desc(XQ_P[i])->min, drum_p_desc(XQ_P[i])->max) : p[XQ_P[i]];
+    if (!q)
+        *xq_par(d, XQ_GATE) = (int16_t)TP[P_SGATE].def;
+}
+/* e -> D2, D3, every value inside its range; no e (or not one): empty, on USR1 and USR2. The audio ISR must not run
+ * meanwhile, as proj_apply */
+static void xd_apply(const xd_ext_t *e)
+{
+    uint32_t d, i, k;
+    xd_ref_t r;
+    for (d = 1; d < 3u; d++) {
+        const xd_trk_t *t = e && (e->magic == XD_MAGIC || e->magic == XD_MAGIC2) ? &e->d[d - 1u] : 0;
+        xd_ref(d, &r);
+        memset(r.fill, 0, NSTEP / 4u);
+        xd_snd_apply(d, t && e->magic == XD_MAGIC2 ? e->q[d - 1u] : 0);   /* (PHREAK 1.1) its USR kit sound */
+        if (!t) {
+            memset(r.dstep, 0, sizeof(dstep_t) * NSTEP);
+            memset(r.micro, 0, NSTEP);
+            for (i = 0; i < XD_NP; i++)
+                *r.p[i] = i == XD_LVL ? GP[G_DRLVL].def : TP[XD_P[i]].def;
+            *r.p[XD_KIT] = (int16_t)(DRUM_USR + d - 1u);
+            *r.p[XD_MUTE] = 0;
+            continue;
+        }
+        for (i = 0; i < XD_NP; i++)
+            *r.p[i] = (int16_t)(i == XD_KIT ? clamp(t->p[i], 0, DRUM_KITS - 1) : i == XD_LVL ? clamp(t->p[i], 0, 127)
+                                                                                : clamp(t->p[i], TP[XD_P[i]].min, TP[XD_P[i]].max));
+        memcpy(r.dstep, t->dstep, sizeof(dstep_t) * NSTEP);
+        for (k = 0; k < NSTEP; k++) {
+            int32_t m = t->mf[k] & 63;
+            uint32_t c = (uint32_t)t->mf[k] >> 6;
+            r.micro[k] = (int8_t)clamp(m >= 32 ? m - 64 : m, MICRO_MIN, MICRO_MAX);
+            if (c != 3u)
+                r.fill[k / 4u] |= (uint8_t)(c << (2u * (k % 4u)));
+        }
+    }
+}
 
 UI_SMALL static uint32_t proj_hash(const void *p, uint32_t n)   /* FNV-1a over n bytes */
 {
@@ -480,6 +580,20 @@ UI_SMALL static void proj_capture(project_t *p)        /* what is playing now, a
         memcpy(p->t[i].lock, trk[i].lock, sizeof trk[i].lock);
     }
     drum_tw_put(p);                                     /* (2.7) the drum sounds' TUNE and DECAY */
+    if (drum_focus) {                                   /* D2 or D3 shown: the project's drum track is D1 (xdrums.c) */
+        proj_trk_t *t = &p->t[TRK_DRUM];
+        xd_ref_t r;
+        uint32_t k;
+        xd_ref(0, &r);
+        for (i = 0; i < XD_NP; i++)
+            pt_set(t, XD_P[i], *r.p[i]);
+        for (i = 0; i < XQ_N; i++)
+            pt_set(t, XQ_P[i], *xq_par(0, i));
+        memcpy(t->step, r.dstep, sizeof t->step);
+        for (k = 0; k < NSTEP; k++)
+            pt_set_mf(t, k, r.micro[k], (uint32_t)r.fill[k / 4u] >> (2u * (k % 4u)));
+        memcpy(t->lock, d1_lock, sizeof t->lock);
+    }
     p->sum = proj_sum(p);
 }
 
@@ -488,7 +602,9 @@ UI_SMALL static void proj_capture(project_t *p)        /* what is playing now, a
  * meanwhile (the song sections: called from it; a load: IRQ off) */
 static void proj_apply(const project_t *p, int all)
 {
-    uint32_t i, k;
+    uint32_t i, k, f = drum_focus;
+    if (f)
+        xd_from(&xd_tmp, TDRUM);                        /* D2 or D3 shown: put aside (D1 is the project's drum track) */
     for (i = 0; i < PROJ_NG; i++)
         if (all ? i != G_SLOT && i != G_LOAD && i != G_SAVE && i != G_SYNC && i != G_MIDI && i != G_ROUTE && i != G_DRCH &&
                       i != G_INFO
@@ -506,10 +622,13 @@ static void proj_apply(const project_t *p, int all)
         t->user = 0;                                    /* (no user preset slot is saved) */
         t->lk_n = 0;                                    /* (the locks in force: the values come from the project) */
         for (i = 0; i < P_COUNT; i++) {                 /* every value back inside its range */
-            const param_desc_t *d = k == TRK_DRUM && i == P_E0 ? &DRUM_KIT_DESC :   /* the drum kit */
+            const param_desc_t *d = k == TRK_DRUM && (i == P_E0 || drum_snd_desc(i)) ? drum_p_desc(i) :   /* the drum
+                                                         * kit, (PHREAK 1.1) the USR kit sound's slots */
                                     i >= P_E0 && i <= P_E7 ? &ENGINES[e]->edit[i - P_E0] : &TP[i];
             t->p[i] = (int16_t)clamp(pt_get(s, i), d->min, d->max);
         }
+        if (k == TRK_DRUM && t->p[DS_MARK] != 1)
+            drum_snd_defaults(t->p);                    /* (PHREAK 1.1) saved before: its USR kit sound as new */
         if (!(p->rsv[0] & 0x40u) && !t->p[P_AMODE])
             t->p[P_AHOLD] = 0;                          /* (2.7) saved before 2.7: HOLD with the arp OFF did nothing then; it
                                                          * is KBD HOLD now, so it starts OFF (no note held by surprise) */
@@ -551,6 +670,14 @@ static void proj_apply(const project_t *p, int all)
             }
         fm6_track_loaded(t);                            /* FM6: the project keeps PTCH, not the patch: its slot's */
     }
+    if (f) {                                            /* D1 to its place in xd[], the one shown back */
+        xd_from(&xd[xd_slot(0)], TDRUM);
+        memcpy(d1_lock, TDRUM->lock, sizeof d1_lock);
+        xd_to(TDRUM, &xd_tmp);
+        for (i = 0; i < NLOCK; i++)
+            TDRUM->lock[i].step = LOCK_FREE, TDRUM->lock[i].param = 0, TDRUM->lock[i].val = 0;
+        TDRUM->lk_n = 0;
+    }
 }
 
 #ifndef PROJ_HOST
@@ -568,31 +695,62 @@ static union {
     project_v2_t v2;
     project_v1_t v1;
 } proj_tmp;
+/* (PHREAK 1.1) a flash object of n sections' D2, D3 -> dst, as this format: PHREAK 1.0's (XDR1) kept, their USR kit
+ * sound as new (xd_apply). dst may be proj_tmp itself: the records grow, so they move from the last */
+static int xd_load(uint32_t obj, xd_ext_t *dst, uint32_t n)
+{
+    int got = st_load(obj, &proj_tmp, sizeof proj_tmp);
+    uint32_t i;
+    if (got == (int)(n * sizeof(xd_ext_t))) {
+        if ((void *)dst != (void *)&proj_tmp)
+            memcpy(dst, &proj_tmp, n * sizeof(xd_ext_t));
+        return 0;
+    }
+    if (got != (int)(n * sizeof(xd_ext_v1_t)))
+        return -1;
+    for (i = n; i-- > 0;) {                             /* (the same magic and tracks first: xd_ext_v1_t) */
+        const uint8_t *from = (const uint8_t *)(const void *)&proj_tmp + i * sizeof(xd_ext_v1_t);
+        uint8_t *to = (uint8_t *)(void *)&dst[i];
+        uint32_t b;
+        for (b = sizeof(xd_ext_v1_t); b-- > 0;)         /* (byte by byte from the end: to >= from, no memmove here) */
+            to[b] = from[b];
+        memset(dst[i].q, 0, sizeof dst[i].q);
+    }
+    return 0;
+}
+UI_SMALL static uint32_t proj_obj(uint32_t s) { s &= 7u; return s < 4u ? OBJ_PROJECT0 + s : OBJ_SECT4 + s - 4u; }
+UI_SMALL static int xd_store(uint32_t s)               /* section s's D2, D3 into flash, with its pair's (A B, C D...) */
+{
+    s &= 6u;
+    return st_save2(OBJ_XD0 + s / 2u, xd_sec(s), sizeof(xd_ext_t), xd_sec(s + 1u), sizeof(xd_ext_t));
+}
 UI_SMALL static void *up_stage(void) { return &proj_tmp; }   /* upreset.c: a user preset bank staged for a write (sloop-lab) */
 UI_SMALL static void proj_fetch(uint32_t slot)
 {
-    project_t *q = &proj_slot[slot & 3u];
-    int n = st_load(OBJ_PROJECT0 + (slot & 3u), &proj_tmp, sizeof proj_tmp);
+    project_t *q = proj_sec(slot);
+    int n = st_load(proj_obj(slot), &proj_tmp, sizeof proj_tmp);
     if (!proj_import(q, &proj_tmp, n))
         q->magic = 0;
 }
 #include "fm6_bank.c"                           /* the FM6 patch bank (eng_fm6.c PTCH B1..B27): staged in proj_tmp */
 #endif
 
-static const char *const SEC_NAME[4] = {"A", "B", "C", "D"};   /* (2.7: the slots named as the song's sections) */
+static const char *const SEC_NAME[NSECT] = {"A", "B", "C", "D", "E", "F", "G", "H"};   /* (2.7: the slots named as the
+                                                         * song's sections; eight) */
 UI_SMALL static void project_save(uint32_t slot)
 {
-    project_t *p = &proj_slot[slot & 3u];
+    project_t *p = proj_sec(slot);
 #if FELUCCA_ARRANGER
     if (song.playing || transport_req) { ui_message("STOP BEFORE SAVE"); return; }
 #endif
     proj_capture(p);
+    xd_capture(xd_sec(slot));
 #if FELUCCA_FLASH
     if (flash_ok) {
-        if (st_save(OBJ_PROJECT0 + (slot & 3u), p, sizeof *p))
+        if (st_save(proj_obj(slot), p, sizeof *p) || xd_store(slot))
             ui_message("SAVE ERROR");
         else
-            ui_say("SAVED SECTION ", SEC_NAME[slot & 3u]);
+            ui_say("SAVED SECTION ", SEC_NAME[slot & 7u]);
         return;
     }
 #endif
@@ -605,22 +763,23 @@ UI_SMALL static void project_save(uint32_t slot)
  * so song mode still plays. Stopped only: a flash erase stops the audio ~50 ms */
 UI_SMALL static void project_erase(uint32_t slot)
 {
-    slot &= 3u;
+    slot &= 7u;
 #if FELUCCA_ARRANGER
     if (song.playing || transport_req) { ui_message("STOP BEFORE ERASE"); return; }
 #endif
-    if (!proj_ok(&proj_slot[slot])) {
+    if (!proj_ok(proj_sec(slot))) {
         ui_say("EMPTY SECTION ", SEC_NAME[slot]);
         return;
     }
 #if FELUCCA_FLASH
-    if (flash_ok && st_save(OBJ_PROJECT0 + slot, &proj_slot[slot], 0)) {
+    if (flash_ok && st_save(proj_obj(slot), proj_sec(slot), 0)) {
         ui_message("ERASE ERROR");
         return;
     }
 #endif
     fm1_irq_off();
-    memset(&proj_slot[slot], 0, sizeof proj_slot[slot]);
+    memset(proj_sec(slot), 0, sizeof(project_t));
+    memset(xd_sec(slot), 0, sizeof(xd_ext_t));
     sec_dirty &= (uint8_t)~(1u << slot);
     if (live_sec == (int8_t)slot)
         live_sec = -1;
@@ -629,6 +788,10 @@ UI_SMALL static void project_erase(uint32_t slot)
         song_dirty = 1;                                     /* (saved with the settings, when quiet) */
 #endif
     fm1_irq_on();
+#if FELUCCA_FLASH
+    if (flash_ok)
+        xd_store(slot);                                     /* (its D2, D3 gone too) */
+#endif
     ui_say("ERASED SECTION ", SEC_NAME[slot]);
 }
 
@@ -646,8 +809,9 @@ UI_SMALL static void proj_foreign_parts(const project_t *p)
         }
 }
 
-/* a project into the working one: the transport stops, everything sounding is released */
-UI_SMALL static void project_apply(const project_t *p)
+/* a project into the working one: the transport stops, everything sounding is released. x: its D2, D3 (a section's),
+ * 0: they stay as they are (the editor's restore) */
+UI_SMALL static void project_apply(const project_t *p, const xd_ext_t *x)
 {
     uint32_t k;
     transport_req = 2;
@@ -657,6 +821,8 @@ UI_SMALL static void project_apply(const project_t *p)
         ex_off[k] = 0;                                  /* (2.7.1) MIDI EXPRESSION: full again, as after CC 121 */
     fm1_irq_off();                                      /* the audio ISR must not see half a project */
     proj_apply(p, 1);
+    if (x)
+        xd_apply(x);
     song.sel = (uint8_t)(p->sel < NTRK ? p->sel : 0u);
     fm1_irq_on();
     for (k = 0; k < NPART; k++)                         /* a format 1 project: the default sounds of tracks 2, 3 */
@@ -671,7 +837,7 @@ UI_SMALL static void project_apply(const project_t *p)
 
 UI_SMALL static void project_load(uint32_t slot)
 {
-    project_t *p = &proj_slot[slot & 3u];
+    project_t *p = proj_sec(slot);
 #if FELUCCA_ARRANGER
     if (song.playing || transport_req) { ui_message("STOP BEFORE LOAD"); return; }
 #endif
@@ -680,11 +846,11 @@ UI_SMALL static void project_load(uint32_t slot)
         proj_fetch(slot);
 #endif
     if (!proj_ok(p)) {
-        ui_say("EMPTY SECTION ", SEC_NAME[slot & 3u]);
+        ui_say("EMPTY SECTION ", SEC_NAME[slot & 7u]);
         return;
     }
-    project_apply(p);
-    ui_say("LOADED SECTION ", SEC_NAME[slot & 3u]);
+    project_apply(p, xd_sec(slot));
+    ui_say("LOADED SECTION ", SEC_NAME[slot & 7u]);
 }
 
 /* ---- the working project, kept in flash by itself: saved when it changed, the transport is stopped,
@@ -693,7 +859,22 @@ UI_SMALL static void project_load(uint32_t slot)
 #define AUTOSAVE_IDLE 2500u                    /* ms without input */
 #define AUTOSAVE_GAP 20000u                    /* ms between two saves at least */
 static project_t autosave_buf __attribute__((section(".pool")));
-static uint32_t autosave_hash, autosave_ms, autosave_checked;
+static uint32_t autosave_hash, autosave_ms, autosave_checked, xd_auto_hash;
+#if FELUCCA_FLASH
+UI_SMALL static int xd_autosave(void)                   /* the working D2, D3 (OBJ_XDW), when they changed: staged in proj_tmp */
+{
+    xd_ext_t *x = (xd_ext_t *)(void *)&proj_tmp;
+    uint32_t h;
+    xd_capture(x);
+    h = st_crc32(x, sizeof *x);
+    if (h == xd_auto_hash)
+        return 0;
+    if (st_save(OBJ_XDW, x, sizeof *x))
+        return -1;
+    xd_auto_hash = h;
+    return 0;
+}
+#endif
 
 UI_SMALL static int audio_quiet(void)
 {
@@ -716,13 +897,16 @@ UI_SMALL static void autosave_tick(void)                /* main loop */
         now - ui_input_ms < AUTOSAVE_IDLE || now - autosave_ms < AUTOSAVE_GAP || now - autosave_checked < 1000u)
         return;
     autosave_checked = now;
+    if (!audio_quiet())
+        return;
     proj_capture(&autosave_buf);
     h = autosave_buf.sum;
-    if (h == autosave_hash || !audio_quiet())
-        return;
-    if (st_save(OBJ_AUTOSAVE, &autosave_buf, sizeof autosave_buf) == 0)
-        autosave_hash = h;
-    autosave_ms = fm1_ms;
+    if (h != autosave_hash) {
+        if (st_save(OBJ_AUTOSAVE, &autosave_buf, sizeof autosave_buf) == 0)
+            autosave_hash = h;
+        autosave_ms = fm1_ms;
+    }
+    xd_autosave();                                      /* (D2, D3: a hash of their own) */
 #endif
 }
 
@@ -746,6 +930,13 @@ UI_SMALL static void autosave_resume(void)              /* power-on: the project
     }
     drch_seed = 0;
     proj_apply(q, 1);
+    {   /* its D2, D3 (staged in proj_tmp: q is autosave_buf) */
+        xd_ext_t *x = (xd_ext_t *)(void *)&proj_tmp;
+        if (xd_load(OBJ_XDW, x, 1u) == 0) {
+            xd_apply(x);
+            xd_auto_hash = st_crc32(x, sizeof *x);
+        }
+    }
     song.sel = (uint8_t)(q->sel < NTRK ? q->sel : 0u);
     proj_foreign_parts(q);                         /* (2.8.4) Clipper's working project: its own sounds, default */
     for (n = 0; n < NPART; n++)
@@ -844,16 +1035,22 @@ UI_SMALL static void persist_boot(void)                    /* before settings_in
                 panel = old;
         }
     }
+    {   /* the sections' D2, D3 (a pair to an object): not there, or not whole: empty */
+        uint32_t k;
+        for (k = 0; k < NSECT / 2u; k++)
+            if (xd_load(OBJ_XD0 + k, xd_sec(2u * k), 2u) != 0)   /* (PHREAK 1.0's: xd_load) */
+                memset(xd_sec(2u * k), 0, 2u * sizeof(xd_ext_t));
+    }
     {   /* projects: fill empty RAM slots from flash, so the slot list is right after power-on. A slot
          * still valid in RAM (a warm reset: an update, UPDATE MODE, a crash) may never have reached
          * flash (a live section stored while playing): marked to be written when quiet */
         uint32_t i;
-        for (i = 0; i < 4u; i++)
-            if (!proj_ok(&proj_slot[i])) {
+        for (i = 0; i < NSECT; i++)
+            if (!proj_ok(proj_sec(i))) {
                 proj_fetch(i);
             } else {
-                int n = st_load(OBJ_PROJECT0 + i, &proj_tmp, sizeof proj_tmp);
-                if (n != (int)sizeof proj_slot[i] || memcmp(&proj_tmp.v6, &proj_slot[i], sizeof proj_slot[i]))
+                int n = st_load(proj_obj(i), &proj_tmp, sizeof proj_tmp);
+                if (n != (int)sizeof(project_t) || memcmp(&proj_tmp.v6, proj_sec(i), sizeof(project_t)))
                     sec_dirty |= (uint8_t)(1u << i);
             }
     }
@@ -863,7 +1060,7 @@ UI_SMALL static void persist_boot(void)                    /* before settings_in
 #endif
 }
 
-UI_SMALL static int project_used(uint32_t slot) { return proj_ok(&proj_slot[slot & 3u]); }
+UI_SMALL static int project_used(uint32_t slot) { return proj_ok(proj_sec(slot)); }
 
 #if FELUCCA_FLASH
 /* SLOOP 2.5: the settings object holds the SYN kits after persist_t (drum_synth.c dsu): firmware before 2.5 reads
@@ -1078,27 +1275,28 @@ UI_SMALL static uint32_t settings_restore(const void *raw, uint32_t n)
     return 0;
 }
 
-/* slot 0..3 (n 0: empty), or 4: the working project (loaded now) */
+/* section 0..7 (A..H; n 0: empty), or PROJ_WORKING: the working project (loaded now) */
+#define PROJ_WORKING 8u
 UI_SMALL static uint32_t project_restore(uint32_t slot, const void *raw, uint32_t n)
 {
     if (song.playing || transport_req)
         return 3;
-    if (slot < 4u && !n) {
-        if (!flash_ok || st_save(OBJ_PROJECT0 + slot, raw, 0))
+    if (slot < NSECT && !n) {
+        if (!flash_ok || st_save(proj_obj(slot), raw, 0))
             return 4;
-        memset(&proj_slot[slot], 0, sizeof proj_slot[slot]);
+        memset(proj_sec(slot), 0, sizeof(project_t));
         sec_dirty &= (uint8_t)~(1u << slot);
         return 0;
     }
     if (!proj_import(&autosave_buf, raw, (int)n))
         return 2;
-    if (slot == 4u) {
-        project_apply(&autosave_buf);
+    if (slot == PROJ_WORKING) {
+        project_apply(&autosave_buf, 0);
         return 0;
     }
-    if (!flash_ok || st_save(OBJ_PROJECT0 + slot, &autosave_buf, sizeof autosave_buf))
+    if (!flash_ok || st_save(proj_obj(slot), &autosave_buf, sizeof autosave_buf))
         return 4;
-    memcpy(&proj_slot[slot], &autosave_buf, sizeof proj_slot[slot]);
+    memcpy(proj_sec(slot), &autosave_buf, sizeof(project_t));
     sec_dirty &= (uint8_t)~(1u << slot);
     return 0;
 }
@@ -1117,22 +1315,23 @@ UI_SMALL static void arrangement_save(void)
     ui_message("SONG IN RAM ONLY");
 }
 
-/* ---- live sections (SAVE + key, ui_layers.c). A section is a project slot (A..D = 1..4): stored into RAM
+/* ---- live sections (SAVE + key, ui_layers.c). A section is a project slot (A..H = 1..8): stored into RAM
  * at once (playing too), written to flash once the transport is stopped and nothing sounds (an erase
  * stops the audio for ~50 ms); a song recorded with SONG REC is saved the same way. */
 UI_SMALL static void section_store(uint32_t s)
 {
-    s &= 3u;
+    s &= 7u;
     fm1_irq_off();                                      /* (the audio ISR may be applying a section) */
-    proj_capture(&proj_slot[s]);
+    proj_capture(proj_sec(s));
+    xd_capture(xd_sec(s));
     live_sec = (int8_t)s;
     fm1_irq_on();
     sec_dirty |= (uint8_t)(1u << s);
 }
 UI_SMALL static void section_load(uint32_t s)                    /* stopped: the section is the loop now */
 {
-    s &= 3u;
-    project_apply(&proj_slot[s]);
+    s &= 7u;
+    project_apply(proj_sec(s), xd_sec(s));
     live_sec = (int8_t)s;
 }
 UI_SMALL static void sections_write(void)                        /* the dirty sections and song into flash */
@@ -1140,8 +1339,8 @@ UI_SMALL static void sections_write(void)                        /* the dirty se
     uint32_t i;
 #if FELUCCA_FLASH
     if (flash_ok)
-        for (i = 0; i < 4u; i++)
-            if (((sec_dirty >> i) & 1u) && st_save(OBJ_PROJECT0 + i, &proj_slot[i], sizeof proj_slot[i]) == 0)
+        for (i = 0; i < NSECT; i++)
+            if (((sec_dirty >> i) & 1u) && st_save(proj_obj(i), proj_sec(i), sizeof(project_t)) == 0 && xd_store(i) == 0)
                 sec_dirty &= (uint8_t)~(1u << i);       /* (a failed write stays dirty: tried again later) */
     if (!flash_ok)
 #endif
@@ -1162,6 +1361,7 @@ UI_SMALL static void persist_flush_now(void)
         proj_capture(&autosave_buf);
         if (autosave_buf.sum != autosave_hash && st_save(OBJ_AUTOSAVE, &autosave_buf, sizeof autosave_buf) == 0)
             autosave_hash = autosave_buf.sum;
+        xd_autosave();
     }
 #endif
 }

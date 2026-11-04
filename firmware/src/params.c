@@ -9,7 +9,7 @@ static const char *const N_LSYNC[] = {"OFF", "4BAR", "2BAR", "1BAR", "1/2", "1/4
 static const char *const N_LTRIG[] = {"NOTE", "FREE"};
 static const char *const N_LPOL[] = {"BI", "UNI"};
 /* GLO > MIDI (2.6): a synth track's MIDI channel, and the other channels */
-static const char *const N_SECT[] = {"A", "B", "C", "D", 0};   /* SAVE > SECTION (2.7): the slot as its section */
+static const char *const N_SECT[] = {"A", "B", "C", "D", "E", "F", "G", "H", 0};   /* SAVE > SECTION (2.7): the slot as its section */
 static const char *const N_MCH[] = {"OFF", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"};
 static const char *const N_MOTH[] = {"SEL", "OFF"};
 /* GLO > TEXTURE (2.6, fx.c texture_*): the bed's sources (the user slots last), its movement's length, when it plays */
@@ -170,7 +170,7 @@ static const param_desc_t GP[G_COUNT] = {
     [G_SYNC] = PE("SYNC", N_SYNC, 0),           /* a setting of the FM-1, not of a project (panel.c lights_sync) */
     [G_ROUTE] = PE("IN", N_MIN, 0),             /* MIDI IN: NOTES (and the clock), CLOCK only, or CH n: that channel only (a setting of the FM-1) */
     [G_INFO] = PD("CPU", F_INT, 0, 0, 0),
-    [G_SLOT] = {"SECT", F_INT, 1, 4, 1, N_SECT, 0},     /* (2.7: A..D, the song's sections; "SLOT" 1..4 before) */
+    [G_SLOT] = {"SECT", F_INT, 1, 8, 1, N_SECT, 0},     /* (2.7: A..D, the song's sections; "SLOT" 1..4 before; now A..H) */
     [G_NAME] = PE("NAME", N_DASH, 0),
     [G_LOAD] = PE("LOAD", N_GO, 0),
     [G_SAVE] = PE("SAVE", N_GO, 0),
@@ -231,6 +231,8 @@ static const param_desc_t ESYNC_DESC[3] = {   /* ATK DEC REL with ENV SYNC on: t
 static const param_desc_t *track_desc(const track_t *t, uint32_t id)
 {
     if(is_drum(t) && id==P_E0) return &DRUM_KIT_DESC;
+    if (is_drum(t) && drum_snd_desc(id))              /* (PHREAK 1.1) the USR kit sound's slots (drums.c DS_*) */
+        return drum_snd_desc(id);
     if (id >= P_IA && id <= P_IC)                     /* the INSERT's values as its TYPE names them */
         return ins_desc(t->p[P_ITYPE], id - P_IA);
     if (t->p[P_ESYNC] && (id == P_ATK || id == P_DEC || id == P_REL))   /* ENV SYNC: note values */
@@ -441,11 +443,29 @@ static const page_t PAGES[] = {
 };
 #define NPAGES (sizeof(PAGES) / sizeof(PAGES[0]))
 
+/* (PHREAK 1.1) the drum track shown plays a USR kit: its ENV, LFO and EDIT pages shape the hits (drums.c XQ_P) */
+static int drum_snd_on(void) { return is_drum(TSEL) && drum_usr(drum_kit()); }
+/* the drum track's slot a USR kit page's id edits (EDIT's P_E1..P_E6: DS_*), 0xFF none (SHP, ESYNC, KTR: no use here) */
+static uint32_t drum_snd_id(uint32_t id)
+{
+    static const uint8_t E[8] = {P_E0, DS_TUNE, DS_BITS, DS_LOOP, DS_CUT, DS_RES, DS_DRV, 0xFF};
+    if (id >= P_E0 && id <= P_E7)
+        return E[id - P_E0];
+    return id == P_ED_SHP || id == P_ESYNC || id == P_LD_SHP ? 0xFFu : id;
+}
+static int page_snd(const page_t *pg)               /* a page of the USR kit sound */
+{
+    return pg->fam == FAM_ENV || pg->fam == FAM_LFO ||
+           (pg->fam == FAM_EDIT && (pg->scope == SC_ENGINE || pg->id[0] == P_FTYPE));
+}
+
 /* the drum track has no sound of its own: it uses the global pages (not the preset
  * pages, nor TOOLS > INIT: page_desc), STEP, PATTERN, SLICER and TRACKS; every other page
- * shows "DRUM TRACK" */
+ * shows "DRUM TRACK". (PHREAK 1.1) With a USR kit, the ENV, LFO and EDIT pages too (EDIT 1, EDIT 2, FILTER) */
 static int page_for_drum(const page_t *pg)
 {
+    if (drum_snd_on() && page_snd(pg))
+        return 1;
     if (pg->scope == SC_STEP)                       /* (2.4) the synth steps' roll: the drums have their grid. Reached */
         return 0;                                   /* by ALGO from a synth track, it drew the drum steps as notes */
     if (pg->scope == SC_GLOBAL)
@@ -458,6 +478,8 @@ static int page_for_drum(const page_t *pg)
 /* a page the buttons and SELECT reach on the selected track: EDIT > FILTER (TYPE) on ANALOG only */
 static int page_shown(const page_t *pg)
 {
+    if (drum_snd_on() && pg->fam == FAM_EDIT)          /* (PHREAK 1.1) a USR kit: EDIT 1, EDIT 2, FILTER (not VOICE) */
+        return page_snd(pg);
     return pg->id[0] != P_FTYPE || (!is_drum(TSEL) && TSEL->eng_req % NENGINES == 0u);
 }
 
@@ -475,6 +497,13 @@ static const param_desc_t *page_desc(const page_t *pg, uint32_t slot, int16_t **
     if (pg->scope == SC_GLOBAL) {
         *valp = &song.g[id];
         return &GP[id];
+    }
+    if (is_drum(TSEL) && page_snd(pg)) {               /* (PHREAK 1.1) a USR kit's sound: the drum track's slot */
+        id = drum_snd_id(id);
+        if (id == 0xFFu) {
+            *valp = 0;
+            return 0;
+        }
     }
     *valp = &TSEL->p[id];
     return track_desc(TSEL, id);

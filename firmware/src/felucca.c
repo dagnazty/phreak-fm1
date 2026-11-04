@@ -198,5 +198,11 @@ static void ota_commit(const uint8_t *parm)
 #if FELUCCA_OTA
 #include "recovery.c"        /* early, polled USB updater; no synth or settings */
 #endif
+#ifndef FELUCCA_USBSTICK
+#define FELUCCA_USBSTICK 1       /* LOAD FROM USB at power-on (OCT+): samples from a USB stick (usbstick.c) */
+#endif
+#if FELUCCA_USBSTICK && FELUCCA_OTA
+#include "usbstick.c"
+#endif
 #include "splash.c"          /* SLOOP boot logo (build/gen/sloop_logo.h) */
 #include "main.c"

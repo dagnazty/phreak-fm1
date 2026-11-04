@@ -11,16 +11,18 @@
  *   6 ROLL (as ARP + key): track, note (the drums: lane), level, down / up; the rate is GLO's ROLL (G_ROLL)
  *   7 ERASE as it plays (as EDIT + key): track, note (the drums: lane), down / up
  *   8 the pattern (as EDIT + KNOB 1..3): track, tool (0 shift, 1 length x2 / half, 2 transpose), step +1 (1) / -1 (0)
- *   9 a chain of sections (as SAVE + several keys): n (0: the chain stops), then n sections (0..3), up to CHAIN_MAX
+ *   9 a chain of sections (as SAVE + several keys): n (0: the chain stops), then n sections (0..7), up to CHAIN_MAX
  *  10 THROW (as FX + OCT- / OCT+): bit 0 the reverb, bit 1 the echo, while set (0: let go)
  *  11 the master level: 0..126, 127: back to the MASTER knob (turning the knob also takes it back)
  *  12 a drum sound's TUNE and DECAY (the DRUMS screen's SOUND page): lane, TUNE + 8 (0..15), DECAY + 4 (0..7)
+ *  13 store the loop into a section: 0..7 = A..H (SAVE + key 5..8, the bank of key 15 aside)
  * The notes themselves go as plain MIDI notes (the tracks' channels): no SysEx between a key and its sound.
  * State: flags (playing, PLAY asked, song mode, song plays, fill now, fill next bar, SONG REC), flags 2 (REC armed
  * and waiting, undo / redo there, a free take running), BPM v14, the section playing + 1, the one asked for + 1, the chain (entries, the
  * one playing), mutes, solos, REC tracks, the selected track, the punch-in effect + 1, CPU %, the song (entry,
  * entries, its bar, its bars), the sections stored (bit per section), then per track: its step, its length, its meter (8 log2 |peak|, 0 = silent);
- * then (2.7, ops 6..12) the master (0: the knob, else the page's level + 1), the THROWs (bits), the 16 drum sounds' TUNE + 8 | DECAY + 4 << 4 */
+ * then (2.7, ops 6..12) the master (0: the knob, else the page's level + 1), the THROWs (bits), the 16 drum sounds' TUNE + 8 | DECAY + 4 << 4;
+ * then the sections E..H stored (bits 0..3) */
 #define ED_LIVE 77u
 UI_SMALL static void ed_live(const uint8_t *a, uint32_t na)
 {
@@ -113,15 +115,15 @@ UI_SMALL static void ed_live(const uint8_t *a, uint32_t na)
                 chain_n = 0;
             } else if (song.playing && !arrangement_clock.running && a[1] <= CHAIN_MAX && na >= 2u + a[1]) {
                 for (i = 0; i < a[1]; i++)
-                    if (!((arrangement_ready() >> (a[2 + i] & 3u)) & 1u))
+                    if (!((arrangement_ready() >> (a[2 + i] & 7u)) & 1u))
                         break;
                 if (i == a[1]) {
                     fm1_irq_off();
                     for (i = 0; i < a[1]; i++)
-                        chain_sec[i] = a[2 + i] & 3u;
+                        chain_sec[i] = a[2 + i] & 7u;
                     chain_i = 0;
-                    live_req = (int8_t)(a[2] & 3u);
-                    chain_bars = (uint8_t)section_bars(a[2] & 3u);
+                    live_req = (int8_t)(a[2] & 7u);
+                    chain_bars = (uint8_t)section_bars(a[2] & 7u);
                     chain_n = (uint8_t)(a[1] >= 2u ? a[1] : 0u);
                     fm1_irq_on();
                 } else {
@@ -135,6 +137,14 @@ UI_SMALL static void ed_live(const uint8_t *a, uint32_t na)
         case 11:
             ed_master_k = 0xFFFFu;
             ed_master = (uint8_t)(a[1] >= 127u ? 0u : a[1] + 1u);
+            break;
+        case 13:                                        /* store the loop into section a[1] (0..7 = A..H), as SAVE
+                                                         * + key 5..8 does (the page asks first over a used one) */
+            if (na >= 2u && a[1] < NSECT) {
+                char sb[2] = {(char)('A' + a[1]), 0};
+                section_store(a[1]);
+                ui_say("SAVED ", sb);
+            }
             break;
         case 12:
             if (na >= 4u) {
@@ -187,4 +197,5 @@ UI_SMALL static void ed_live(const uint8_t *a, uint32_t na)
     ed_b(thr_ed | thr_req);
     for (i = 0; i < DRUM_LANES; i++)
         ed_b((uint32_t)(drum_tune[i] + 8) | (uint32_t)(drum_dec[i] + 4) << 4);
+    ed_b((arrangement_ready() >> 4) & 15u);             /* the sections E..H stored */
 }

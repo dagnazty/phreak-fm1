@@ -156,6 +156,11 @@ static const preset_t ANALOG_PRESETS[] = {
      XP(P_LD_PIT + 1, 1, P_LRATE + 1, 80, P_LFADE + 1, 60, P_GLIDE + 1, 30)},
     {"SAW BASS", {0, 6, 64, 0, 52, 30, 40, 64}, {0, 60, 60, 20}, 30, 1, FX(8, 0, 0, 4), XP(P_TRANS + 1, -24)},
     {"SINE PAD", {3, 10, 64, 4, 90, 0, 0, 32}, {80, 90, 118, 90}, 0, 0, FX(0, 60, 20, 65)},
+    /* more 808s (after SLOOP 2.8.4): a long tail, a short punch, two detuned sines driven hard, a long slide */
+    {"808 LONG", {3, 0, 0, 0, 127, 0, 40, 0}, {0, 124, 0, 72}, 0, 1, FX(0, 0, 0, 0), XP(P_GLIDE + 1, 60, P_GLMODE + 1, 1, P_ED_PIT + 1, 14, P_TRANS + 1, -24)},
+    {"808 PUNCH", {3, 0, 0, 0, 127, 0, 84, 0}, {0, 84, 0, 30}, 0, 1, FX(16, 0, 0, 0), XP(P_GLIDE + 1, 40, P_GLMODE + 1, 1, P_ED_PIT + 1, 36, P_TRANS + 1, -24)},
+    {"808 GRIT", {3, 14, 64, 0, 90, 10, 110, 30}, {0, 112, 0, 50}, 0, 1, FX(30, 0, 0, 0), XP(P_GLIDE + 1, 56, P_GLMODE + 1, 1, P_ED_PIT + 1, 20, P_TRANS + 1, -24)},
+    {"808 GLIDE", {3, 0, 0, 0, 127, 0, 60, 0}, {0, 120, 0, 60}, 0, 1, FX(20, 0, 0, 0), XP(P_GLIDE + 1, 104, P_GLMODE + 1, 1, P_ED_PIT + 1, 10, P_TRANS + 1, -24)},
 };
 
 /* (after Clipper 1.2) UNISON (voice.c unison_spread): both oscillators moved by r (Q32) of a turn of the note,

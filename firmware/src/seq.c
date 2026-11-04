@@ -2526,7 +2526,7 @@ static void live_block(void)                       /* once a block while playing
     }
     if (chain_n && live_req < 0 && live_bar >= chain_bars) {   /* the chain: this entry has played its bars */
         chain_i = (uint8_t)((chain_i + 1u) % (chain_n < CHAIN_MAX ? chain_n : CHAIN_MAX));
-        live_req = (int8_t)(chain_sec[chain_i] & 3u);
+        live_req = (int8_t)(chain_sec[chain_i] & 7u);
     }
     if (live_req >= 0) {
         uint32_t s = (uint32_t)live_req;
@@ -2556,6 +2556,7 @@ static void live_block(void)                       /* once a block while playing
 static void seq_reset_tracks(uint32_t pos)
 {
     uint32_t i;
+    xd_reset();                                      /* (D2, D3 too: xdrums.c) */
     for (i = 0; i < NTRK; i++) {
         track_t *t = &trk[i];
         t->seq_abs = SEQ_NONE;
@@ -3559,6 +3560,7 @@ static void events_block(uint32_t n)
     }
     for (i = 0; i < NTRK; i++)
         seq_tick(&trk[i], adv);
+    xd_tick();                                        /* the drum tracks not shown (D2, D3: xdrums.c) */
     click_tick();
     roll_block(adv);
     for (i = 0; i < NPART; i++)
@@ -3575,3 +3577,5 @@ static void events_block(uint32_t n)
 #endif
     }
 }
+
+#include "xdrums.c"         /* the extra drum tracks D2, D3: which one is shown, the others played */

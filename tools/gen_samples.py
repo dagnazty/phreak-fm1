@@ -131,6 +131,9 @@ def name_note(name):
 # SLOOP 2.7.2: sets that keep their first sound only, over the whole keyboard (SCRCH: the scratch, 3 KB; the backspin
 # and the rewind, 20 KB, made room for the NOTES editor). The set and its number stay: projects and presets unchanged
 ONE_SOUND = {"SCRCH"}
+# FLUTE: one note (C5, the middle one) and 0.55 s of it, the loop in its steady part: 30 KB -> 6 KB, the room
+# for LOAD FROM USB (usbstick.c). The set, its number and its presets (LOFI FLUTE, GRAIN's FLUTE DUST) stay
+ONE_NOTE = {"FLUTE": (1, 0.55)}
 
 
 def cc0_entries(setname, kind):
@@ -138,6 +141,8 @@ def cc0_entries(setname, kind):
     files = sorted((CC0 / setname).glob("*.wav"))
     if setname in ONE_SOUND:
         files = files[:1]
+    if setname in ONE_NOTE:
+        files = files[ONE_NOTE[setname][0]:][:1]
     out, conv = [], 1
     if kind != "kit" and not all(re.search(r"_m\d+\.wav$", p.name) for p in files):
         # octave convention of this set (C4 = 60 or C3 = 60): YIN votes, the names give the notes
@@ -171,7 +176,7 @@ def cc0_entries(setname, kind):
             root = hz_to_midi(detect_hz(x, sr))
         x = resample(x, sr, TR)
         keep = {"oneshot": 1.0, "sus": 0.95, "kit": 0.6, "piano": 1.0}[kind]
-        x = x[:int(keep * TR)]
+        x = x[:int(ONE_NOTE.get(setname, (0, keep))[1] * TR)]
         n = len(x)
         if kind == "piano":                          # the attack, then a steady tone the envelope (DEC) fades:
             ls, le, xf, a0 = int(0.55 * TR), n - 1, int(0.08 * TR), int(0.30 * TR)   # long notes in 1 s

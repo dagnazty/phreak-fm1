@@ -364,6 +364,37 @@ KITS = [
         RIDE=S(None, 320, src="cym", nlev=90, ndec=2400, filt=("bp", 6500, .35), hpf=3500, click=16),
         TOMLO=S("sine", 110, 3, 30, 6, 400, 106, 1.5, 40, 20, "white", 16, 0, 40, ("lp", 2000, .1)),
         TOMHI=S("sine", 160, 3, 30, 6, 340, 104, 1.5, 40, 20, "white", 16, 0, 40, ("lp", 2500, .1)))),
+    # more trap (after SLOOP 2.8.4), after SLOOP's kits so their numbers stay
+    ("RAGE", "RAGE TRAP", 0, kit(K808,
+        KICK=S("sine", 54, 24, 22, 10, 360, 124, click=70, drive=80),
+        KICK2=S("sine", 44, 14, 40, 90, 2200, 124, click=24, drive=96),            # the long 808, blown out
+        SNARE=S("tri", 240, 8, 8, 0, 70, 84, 1.6, 60, 50, "white", 120, 4, 130, ("hp", 2400, .25), drive=56),
+        SNARE2=S("tri", 300, 6, 6, 0, 40, 80, 1.5, 50, 56, "white", 112, 0, 70, ("bp", 6000, .4), drive=40),
+        CLAP=dict(nlev=126, ndec=140, filt=("bp", 1700, .45), hpf=1300),
+        CHH=dict(ndec=20, filt=("bp", 11000, .5), hpf=9500, click=16),             # tight: for the rolls
+        OHH=dict(ndec=200, filt=("bp", 10000, .45), hpf=8000),
+        CRASH=dict(ndec=1400, filt=("hp", 5200, .25)),
+        RIM=dict(hz=2100, decay=26, tlev=104, click=56))),
+    ("PLUGG", "PLUGG", 0, kit(K808,
+        KICK=S("sine", 50, 12, 30, 12, 600, 122, click=24, drive=14),
+        KICK2=S("sine", 42, 8, 60, 120, 2400, 124, click=10, drive=22),            # round, long, clean
+        SNARE=S(None, src="clap", nlev=120, ndec=110, filt=("bp", 2400, .35), hpf=1500),   # the snap
+        SNARE2=S("tri", 260, 4, 8, 0, 60, 80, 1.6, 50, 30, "white", 96, 0, 90, ("bp", 5800, .35)),
+        CLAP=dict(nlev=124, ndec=200, filt=("bp", 1600, .4), hpf=1000),
+        CHH=dict(ndec=34, filt=("bp", 12000, .4), hpf=10000, nlev=110),            # airy
+        OHH=dict(ndec=300, filt=("bp", 11000, .4), hpf=9000, nlev=106),
+        RIDE=S("bell", 1320, 0, 5, 10, 700, 100, filt=("bp", 4000, .4, "all")),    # a bell to play the hook on
+        CONGA=S("sine", 880, 0, 5, 20, 320, 104, 2.0, 50),                          # a soft pluck
+        CLAVE=S("sine", 1760, 0, 5, 0, 120, 100, click=8))),
+    ("MEMPHIS", "MEMPHIS", 0x13, kit(K808,
+        KICK=S("sine", 52, 14, 28, 10, 460, 124, click=40, drive=50, filt=("lp", 2400, .1, "all")),
+        KICK2=S("sine", 46, 10, 40, 40, 1300, 124, click=20, drive=70),
+        SNARE=S("tri", 200, 6, 12, 0, 110, 90, 1.7, 60, 30, "white", 112, 6, 180, ("bp", 2800, .3), drive=44),
+        CLAP=dict(nlev=124, ndec=240, filt=("bp", 1100, .35), hpf=700),
+        CHH=dict(ndec=40, filt=("bp", 7600, .35), hpf=6000),
+        OHH=dict(ndec=320, filt=("bp", 7200, .35), hpf=5600),
+        COWBELL=S("bell", 540, 0, 5, 20, 420, 112, filt=("bp", 2400, .5, "all"), drive=24),   # the cowbell
+        RIM=dict(hz=1600, decay=28, tlev=100, click=50))),
 ]
 
 
