@@ -49,6 +49,7 @@ SDK_SHA256 = {
 
 PRODUCT = "FM-1_900"                # package identity; release builds are FM-1_9XY
 VERSION = None                      # FELUCCA_VERSION for release builds (default: firmware/src/ui.c)
+RELEASE = None                      # PHREAK_RELEASE: X.Y on the boot screen (default: firmware/src/ui.c, "DEV")
 
 
 def toolchain():
@@ -103,7 +104,7 @@ def generate():
             [tools / "gen_samples.py", GEN / "felucca_samples.h"],
             [tools / "gen_drumkits.py", GEN / "felucca_drumkits.h"],
             [tools / "gen_fm6_patches.py", GEN / "felucca_fm6.h"],
-            [tools / "gen_logo.py", GEN / "sloop_logo.h"]]
+            [tools / "gen_phreak_logo.py", GEN / "phreak_logo.h"]]
     procs = [subprocess.Popen([sys.executable, *map(str, c)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True) for c in cmds]
     failed = []
@@ -180,13 +181,15 @@ def build_loader():
 def build_app():
     flags = [*CFLAGS, "-Ifirmware/hal", "-Ifirmware/src", "-Ibuild/gen"]
     for flag in ("FELUCCA_FLASH", "FELUCCA_OTA", "FELUCCA_OTA_DRYRUN", "FELUCCA_CDC", "FELUCCA_UART",
-                 "FELUCCA_ICONS", "FELUCCA_SLICE", "FELUCCA_CPU1", "FELUCCA_LOGO_TEXT"):
+                 "FELUCCA_ICONS", "FELUCCA_SLICE", "FELUCCA_CPU1", "FELUCCA_LOGO_TEXT", "FELUCCA_USBSTICK"):
         v = os.environ.get(flag)    # unset: the default in firmware/src/felucca.c
         if v in ("0", "1"):
             flags.append(f"-D{flag}={v}")
     flags.append(f'-DFELUCCA_ID="{PRODUCT}"')
     if VERSION:
         flags.append(f'-DFELUCCA_VERSION="{VERSION}"')
+    if RELEASE:
+        flags.append(f'-DPHREAK_RELEASE="{RELEASE}"')
     tc_all(("cc", "-c", FW / "crt0.S", "-o", OUT / "crt0.o"),
            ("cc", "-c", FW / "hal" / "fm1_vec.S", "-o", OUT / "fm1_vec.o"),
            ("cc", "-c", FW / "hal" / "fm1_isr.S", "-o", OUT / "fm1_isr.o"),
@@ -312,7 +315,7 @@ def mmio_check():
 
 
 def main():
-    global PRODUCT, VERSION
+    global PRODUCT, VERSION, RELEASE
     ap = argparse.ArgumentParser()
     ap.add_argument("--release", metavar="X.Y", help="release build: identity FM-1_9XY, version string X.Y")
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
@@ -323,8 +326,10 @@ def main():
         if not m:
             raise SystemExit(f"--release {a.release}: use X.Y or X.Y-suffix, one digit each")
         PRODUCT = "FM-1_9" + m[1] + m[2]
-        VERSION = a.release.upper() if "BETA" in a.release.upper() else a.release.upper() + " BETA"
-        name = f"felucca-{a.release}.fwsc"
+        # the version string stays ui.c's ("SLOOP 2.8.4+": the editor reads SLOOP's number); X.Y is this
+        # build's own, in the identity and the file name
+        name = f"phreak-{a.release}.fwsc"
+        RELEASE = a.release
     fm1pkg_make.SDK = a.sdk
     for rel, sha in SDK_SHA256.items():          # fail early without the SDK
         if hashlib.sha256(fm1pkg_make.sdk_file(rel)).hexdigest() != sha:

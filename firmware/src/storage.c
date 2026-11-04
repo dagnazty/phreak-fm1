@@ -24,7 +24,21 @@
  * (upreset.c); the working project (autosave, project.c): copy A 0x9F000, copy B 0xFE000 (the two sectors
  * left: A/B needs no two neighbours); the FM6 patch bank (fm6_bank.c, SLOOP 2.4): 0xE5000 / 0xE6000, the first
  * two sectors of the free 0xE5000..0xFBFFF after the update staging (FL_FM6, fm1_flash.h) */
-enum { OBJ_SETTINGS, OBJ_PROJECT0, OBJ_UPRESET0 = OBJ_PROJECT0 + 4, OBJ_AUTOSAVE = OBJ_UPRESET0 + 2, OBJ_FM6BANK, OBJ_COUNT };
+enum { OBJ_SETTINGS, OBJ_PROJECT0, OBJ_UPRESET0 = OBJ_PROJECT0 + 4, OBJ_AUTOSAVE = OBJ_UPRESET0 + 2, OBJ_FM6BANK,
+       OBJ_SECT4, OBJ_XD0 = OBJ_SECT4 + 4, OBJ_XDW = OBJ_XD0 + 4, OBJ_COUNT };
+/* the extra drum tracks D2, D3 of the sections (project.c xd_ext_t): A B, C D, E F, G H two to an object (OBJ_XD0..3),
+ * and the working project's (OBJ_XDW), A/B pairs in the last three sectors of each user sample slot (eng_sample.c
+ * SMP_USER_SIZE: 68 KiB, 80 before; 0xDB000 and 0xFA000 are left) */
+static const uint32_t ST_XD_SECTOR[5][2] = {{0xB1000u, 0xB2000u}, {0xC5000u, 0xC6000u}, {0xD9000u, 0xDA000u},
+                                            {0xF8000u, 0xF9000u}, {0xB3000u, 0xC7000u}};
+/* the song's sections E..H have no A/B pair each: the four share five sectors (ST_POOL). A save goes to
+ * a sector that holds no object's current copy (with five for four there is always one), so a torn write leaves
+ * the previous copy in charge, as A/B does; the header's slot is the pool index. 0x93000..0x96FFF: above the app
+ * area the update loader writes ([0x4000, 0x93000), loader/ldr_core.c; it erases only its own update records
+ * there) and below Felucca's store; 0xFB000: the sector left after USR4 (fm1_flash.h FL_SECT_*) */
+#define ST_POOL 5u
+#define ST_POOLED(obj) ((obj) >= OBJ_SECT4 && (obj) < OBJ_SECT4 + 4u)
+#define ST_COPIES(obj) (ST_POOLED(obj) ? ST_POOL : 2u)
 
 typedef struct {
     uint32_t magic;
@@ -62,6 +76,10 @@ UI_SMALL static uint32_t st_sector(uint32_t obj, uint32_t copy)  /* flash offset
         return 0xE5000u + copy * ST_SECTOR;
     if (obj >= OBJ_UPRESET0 && obj < OBJ_AUTOSAVE)
         return 0xDC000u + (obj - OBJ_UPRESET0) * 2u * ST_SECTOR + copy * ST_SECTOR;
+    if (ST_POOLED(obj))
+        return copy < 4u ? 0x93000u + copy * ST_SECTOR : 0xFB000u;
+    if (obj >= OBJ_XD0 && obj <= OBJ_XDW)
+        return ST_XD_SECTOR[obj - OBJ_XD0][copy & 1u];
     return 0x97000u + (obj - OBJ_PROJECT0) * 2u * ST_SECTOR + copy * ST_SECTOR;
 }
 
@@ -71,7 +89,7 @@ _Static_assert(sizeof main_scratch.st == ST_PAYLOAD_MAX, "the scratch holds a pa
 
 UI_SMALL static int st_head(uint32_t obj, uint32_t copy, st_hdr_t *h)   /* commit record valid: 0 */
 {
-    if (obj >= OBJ_COUNT || copy > 1u)
+    if (obj >= OBJ_COUNT || copy >= ST_COPIES(obj))
         return -1;
     if (st_read(st_sector(obj, copy), h, sizeof *h))
         return -1;
@@ -95,6 +113,22 @@ UI_SMALL static int st_body(uint32_t obj, uint32_t copy, const st_hdr_t *h)   /*
 UI_SMALL static int st_current(uint32_t obj, st_hdr_t *h)
 {
     st_hdr_t a, b;
+    if (ST_POOLED(obj)) {                              /* the pool: the same rule over five sectors */
+        uint32_t c, tried = 0;
+        int best;
+        for (;;) {
+            for (best = -1, c = 0; c < ST_POOL; c++)
+                if (!((tried >> c) & 1u) && st_head(obj, c, &a) == 0 && (best < 0 || a.seq > b.seq))
+                    best = (int)c, b = a;
+            if (best < 0)
+                return -1;
+            if (st_body(obj, (uint32_t)best, &b) == 0) {
+                *h = b;
+                return best;
+            }
+            tried |= 1u << best;
+        }
+    }
     int va = st_head(obj, 0, &a) == 0, vb = st_head(obj, 1, &b) == 0;
     if (vb && (!va || b.seq > a.seq)) {
         if (st_body(obj, 1, &b) == 0) {
@@ -177,14 +211,24 @@ UI_SMALL static int st_side_load(uint32_t obj, void *dst, uint32_t n)
 UI_SMALL static int st_save3(uint32_t obj, const void *src, uint32_t len, const void *src2, uint32_t len2, const void *src3,
                     uint32_t len3)
 {
-    uint32_t seq, base, off;
+    uint32_t seq, base, off, tc;
     int cur, rc;
     st_hdr_t h;
     if (obj >= OBJ_COUNT || len + len2 + len3 > ST_PAYLOAD_MAX)
         return -1;
     cur = st_current(obj, &h);
     seq = cur < 0 ? 0u : h.seq;
-    base = st_sector(obj, cur == 0 ? 1u : 0u);       /* write the other copy */
+    tc = cur == 0 ? 1u : 0u;                          /* write the other copy */
+    if (ST_POOLED(obj)) {                             /* the pool: a sector no object's current copy is in */
+        uint32_t o, busy = 0;
+        st_hdr_t t;
+        for (o = OBJ_SECT4; o < OBJ_SECT4 + 4u; o++)
+            if ((rc = o == obj ? cur : st_current(o, &t)) >= 0)
+                busy |= 1u << rc;
+        for (tc = 0; (busy >> tc) & 1u; tc++)
+            ;
+    }
+    base = st_sector(obj, tc);
     for (off = 0; off < len; off++)
         st_buf[off] = ((const uint8_t *)src)[off];    /* the driver wants RAM sources */
     for (off = 0; off < len2; off++)
@@ -209,7 +253,7 @@ UI_SMALL static int st_save3(uint32_t obj, const void *src, uint32_t len, const 
     }
     h.magic = ST_MAGIC;
     h.type = (uint16_t)obj;
-    h.slot = (uint16_t)(cur == 0 ? 1 : 0);
+    h.slot = (uint16_t)tc;
     h.seq = seq + 1u;
     h.len = len;
     h.crc = st_crc32(st_buf, len);
@@ -219,8 +263,7 @@ UI_SMALL static int st_save3(uint32_t obj, const void *src, uint32_t len, const 
         return rc;
     {   /* read back: a write-protected or failing part must not report SAVED */
         st_hdr_t chk;
-        uint32_t c = cur == 0 ? 1u : 0u;
-        if (st_head(obj, c, &chk) || memcmp(&chk, &h, sizeof h) || st_body(obj, c, &chk))   /* the whole record */
+        if (st_head(obj, tc, &chk) || memcmp(&chk, &h, sizeof h) || st_body(obj, tc, &chk))   /* the whole record */
             return -7;
     }
     return 0;

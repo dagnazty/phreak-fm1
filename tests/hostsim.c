@@ -87,6 +87,7 @@ static void host_tracks_init(void)                /* as felucca_init: defaults, 
             trk[k].p[i] = TP[i].def;
         steps_clear(&trk[k]);
     }
+    drum_snd_defaults(trk[TRK_DRUM].p);          /* (PHREAK 1.1) its USR kit sound as new, as main.c (xd_defaults) */
     song.master_q12 = 4096;
 }
 

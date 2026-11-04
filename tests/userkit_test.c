@@ -83,9 +83,9 @@ int main(void)
           !strcmp(DRUM_KIT_NAMES[DRUM_PAIR], "USR3+4") && DRUM_PAIR == DRUM_SYN - 1u && !strcmp(DRUM_KIT_NAMES[DRUM_SAMPLED], "808"),
           "KIT: USR1..USR4, USR3+4 after the synthesised kits (the old kit numbers kept)");
     check(SMP_USER_OFF(0u) == 0xA0000u && SMP_USER_OFF(2u) == 0xC8000u && SMP_USER_OFF(3u) == 0xE7000u &&
-          FL_STORE_OK(0xE7000u, 0x14000u) && !FL_STORE_OK(0xE7000u, 0x14001u) && !FL_STORE_OK(0xFB000u, 0x1000u) &&
+          FL_STORE_OK(0xE7000u, 0x14000u) && FL_IN(0xE7000u, 0x14000u, FL_USR4_LO, FL_USR4_HI) && !FL_IN(0xE7000u, 0x14001u, FL_USR4_LO, FL_USR4_HI) &&
           SMP_USER_OFF(3u) >= FL_FM6_HI && SMP_USER_OFF(3u) + SMP_USER_SIZE <= FL_GLOB_LO && !strcmp(SMP_ALL_NAMES[SMP_NSETS + 3u], "USR4"),
-          "USR4: 0xE7000..0xFAFFF, after the FM6 bank, before the settings; the store may write it, not past it");
+          "USR4: 0xE7000..0xFAFFF, after the FM6 bank, before the settings; the store may write it, not past it (0xFB000: the E..H pool's)");
 
     TDRUM->p[P_E0] = (int16_t)DRUM_USR;                  /* USR1 */
     quiet();

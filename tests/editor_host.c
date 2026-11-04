@@ -235,6 +235,7 @@ static void harness_init(void)
     persist_boot();
     for (i = 0; i < NPART; i++) { set_engine_of(&trk[i], TRK_DEF[i][0]); apply_preset_to(&trk[i], TRK_DEF[i][1]); trk[i].engine = trk[i].eng_req; }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                               /* D2, D3 as main.c sets them */
     usb.config = 1;
 }
 
@@ -247,6 +248,8 @@ static int params_check(char *why, size_t nw)
         const track_t *t = &trk[k];
         for (i = 0; i < P_COUNT; i++) {
             const param_desc_t *d = k == TRK_DRUM && i == P_E0 ? &DRUM_KIT_DESC :
+                                    k == TRK_DRUM && drum_snd_desc(i) ? drum_snd_desc(i) :   /* (PHREAK 1.1: the USR kit
+                                                                                            * sound's slots) */
                                     i >= P_E0 && i <= P_E7 ? &ENGINES[t->eng_req % NENGINES]->edit[i - P_E0] : &TP[i];
             if (k == TRK_DRUM && i > P_E0 && i <= P_E7)
                 continue;                                   /* (the drum track has no engine values) */

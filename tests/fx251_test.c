@@ -654,15 +654,15 @@ static void t_glide(void)
     check(r[0] > 0.8 && r[1] < r[0] && fabs(r[24] - rt) < 0.01 && fabs(r[63] - rt) < 0.005 && trk[0].gpl == 4096 - 63 * 64,
           "PAN: a jump glides too (the left fades over a few blocks), then lands exactly");
     song.g[G_DRLVL] = 100;
-    drums.gon = 0;
+    drums.gon[0] = 0;
     drums_mix(ml, mr, rv, dl, 0, CTL);
-    g0 = drums.glv;
+    g0 = drums.glv[0];
     song.g[G_DRLVL] = 20;
     drums_mix(ml, mr, rv, dl, 0, CTL);
-    g1 = drums.glv;
+    g1 = drums.glv[0];
     for (b = 0; b < 40u; b++)
         drums_mix(ml, mr, rv, dl, 0, CTL);
-    check(g0 == 100 * 200 && g1 > 20 * 200 + (g0 - 20 * 200) / 2 && drums.glv == 20 * 200,
+    check(g0 == 100 * 200 && g1 > 20 * 200 + (g0 - 20 * 200) / 2 && drums.glv[0] == 20 * 200,
           "drums: LEVEL glides the same way (a quarter a block), then lands exactly");
     check(mix_glide(1000, 1008) == 1008 && mix_glide(1000, 2000) == 1250 && mix_glide(2000, 1000) == 1750,
           "mix_glide: a quarter of the way a block, the last 8 units at once");

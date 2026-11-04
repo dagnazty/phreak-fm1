@@ -444,7 +444,7 @@ UI_SMALL static uint32_t graph_signature(void)
     if (pg->graph == GR_SLCR && t->p[P_SLCR])        /* the SLICER's step playing */
         h ^= (sl[song.sel].idx + 1u) * 2654435761u;
     if (pg->graph == GR_SLOTS)                       /* (a checksum over each slot) */
-        for (i = 0; i < 4u; i++)
+        for (i = 0; i < NSECT; i++)
             h ^= (uint32_t)project_used(i) << (20u + i);
     if (pg->graph == GR_STEPS || pg->graph == GR_ROLL) {
         uint32_t ph = song.playing ? t->seq_idx : 0xFFFFu;
@@ -503,20 +503,20 @@ UI_SMALL static void graph_user(void)
     }
 }
 
-/* the sections A..D (the four slots): used / empty, the selected one in white */
+/* the sections A..H (two columns, A..D and E..H): used / empty, the selected one in white */
 UI_SMALL static void graph_slots(void)
 {
     uint32_t i;
-    for (i = 0; i < 4u; i++) {
-        int32_t y = 8 + (int32_t)i * 26;
+    for (i = 0; i < NSECT; i++) {
+        int32_t y = 8 + (int32_t)(i & 3u) * 26, x = i < 4u ? 0 : 120;
         char b[4];
         int sel = (int32_t)i + 1 == song.g[G_SLOT];
         b[0] = (char)('A' + i);
         b[1] = 0;
         if (sel)
-            cv_rect(4, y + 6, 3, 3, C_WHITE);
-        cv_text(14, y, &FONT_S, b, sel ? C_WHITE : C_GRAY);
-        cv_text(40, y, &FONT_S, project_used(i) ? "USED" : "EMPTY", project_used(i) ? (sel ? C_WHITE : C_HI) : C_DIM);
+            cv_rect(x + 4, y + 6, 3, 3, C_WHITE);
+        cv_text(x + 14, y, &FONT_S, b, sel ? C_WHITE : C_GRAY);
+        cv_text(x + 40, y, &FONT_S, project_used(i) ? "USED" : "EMPTY", project_used(i) ? (sel ? C_WHITE : C_HI) : C_DIM);
     }
 }
 
@@ -548,7 +548,7 @@ UI_SMALL static int32_t meter_px(int32_t a)                   /* |sample| (Q15) 
 
 UI_SMALL static uint32_t trk_level(uint32_t c)                /* LEVEL 0..127 (the drum track: GLO > DRUMS LEVEL) */
 {
-    return (uint32_t)(c == TRK_DRUM ? song.g[G_DRLVL] : trk[c].p[P_LEVEL]) & 127u;
+    return (uint32_t)(c == TRK_DRUM ? (*drum_lvl_ptr()) : trk[c].p[P_LEVEL]) & 127u;
 }
 
 UI_SMALL static void trk_short_name(uint32_t c, char *b)      /* the track's sound, b holds 13 */
@@ -855,7 +855,9 @@ UI_SMALL static void draw_foot(void)
         str_cpy(ti, "HOME", sizeof ti);
     } else {                                           /* page title + number in its family: "ENV DEST 2/2" */
         uint32_t n, k = page_pos(&n);
-        const char *pt = pg->scope == SC_ENGINE ? e->page_title[pg->id[0] != P_E0] : 0;   /* EDIT: the engine's */
+        static const char *const DPT[2] = {"SAMPLE", "TONE"};   /* (PHREAK 1.1) a drum track's USR kit */
+        const char *pt = pg->scope == SC_ENGINE ? (is_drum(t) ? DPT : e->page_title)[pg->id[0] != P_E0] : 0;   /* EDIT:
+                                                         * the engine's */
         str_cpy(ti, pt ? pt : pg->title, 10);
         if (n > 1) {
             str_cpy(ti + str_len(ti), " ", 4);

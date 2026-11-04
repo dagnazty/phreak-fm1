@@ -24,9 +24,9 @@ def check(what, ok):
     bad += not ok
 
 
-check("the editor links the offline file (download)", src.count('download="sloop-editor.html"') == 1)
+check("the editor links the offline file (download)", src.count('download="phreak-editor.html"') == 1)
 check("the installer page links it too",
-      (ROOT / "web" / "index_pkg.html").read_text(encoding="utf-8").count('href="../editor/sloop-editor.html"') == 1)
+      (ROOT / "web" / "index_pkg.html").read_text(encoding="utf-8").count('href="../editor/phreak-editor.html"') == 1)
 check("offline: the icon font inlined", 'url("fukiai.ttf")' not in off and "font/ttf;base64," in off)
 check("offline: no download link to itself", "<!--DL-->" not in off and 'id="offline"' not in off)
 check("offline: the installer and the font licence online",
@@ -55,7 +55,7 @@ try:
     path = lambda f: (app / f / "index.html") if f.endswith("/") else (app / f)   # noqa: E731
     check("sw.js: stamped with the version", 'const STAMP = "9.9-' in sw and "/*" + "FILES*/" not in sw)
     check("sw.js keeps the installer, the editor, its font, the firmware",
-          {"installer/", "editor/", "editor/fukiai.ttf", "../firmware/sloop-9.9.fwsc"} <= set(files))
+          {"installer/", "editor/", "editor/fukiai.ttf", "../firmware/phreak-9.9.fwsc"} <= set(files))
     check("sw.js: every file it keeps is in the site", all(path(f).is_file() for f in files))
     m = json.loads((app / "sloop.webmanifest").read_text(encoding="utf-8"))
     check("manifest: standalone, starts at the editor, icons 192 and 512 (+ maskable)",

@@ -303,7 +303,7 @@ UI_SMALL static void tracks_edit(uint32_t slot, int32_t steps)
             t->p[P_MUTE] = 0;
             return;
         }
-        vp = is_drum(t) ? &song.g[G_DRLVL] : &t->p[P_LEVEL];
+        vp = is_drum(t) ? drum_lvl_ptr() : &t->p[P_LEVEL];
         d = is_drum(t) ? &GP[G_DRLVL] : &TP[P_LEVEL];
         break;
     case 2:
@@ -478,6 +478,7 @@ UI_SMALL static void project_new(void)
         fm1_irq_on();
     }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                                      /* D2, D3: empty again, D1 shown */
     memset(drum_tune, 0, sizeof drum_tune);             /* (2.7) every drum sound as the kit has it */
     memset(drum_dec, 0, sizeof drum_dec);
     drum_mute = 0;                                      /* (2.6: the live mutes) */
@@ -556,6 +557,8 @@ UI_SMALL static void edit_param(uint32_t slot, int32_t steps)
     d = page_desc(pg, slot, &vp);
     if (!d || !vp || d->max == d->min)
         return;
+    if (pg->scope != SC_GLOBAL)
+        id = (uint32_t)(vp - TSEL->p);                    /* (PHREAK 1.1: a USR kit's EDIT values sit in other slots) */
     v = d->names == ESYNC_NAMES || d->names == N_IBITS || d->names == N_IRATE ? names_turn(d, *vp, steps)   /* (a name a detent) */
                                     : clamp(*vp + accel(EN_K1 + slot, steps, d->names ? 0 : d->max - d->min), d->min, d->max);
     *vp = (int16_t)v;
@@ -1276,8 +1279,18 @@ UI_SMALL static void ui_input(void)
         else if (total)
             preset_go((uint32_t)(((int32_t)cur + s % (int32_t)total + (int32_t)total) % (int32_t)total));
     }
-    if ((s = panel_enc(EN_ALGO)) != 0 && !ft_on)     /* ALGORITHM: the selected track, on every page (not in a take) */
-        track_select((uint32_t)clamp((int32_t)song.sel + (s > 0 ? 1 : -1), 0, NTRK - 1));
+    if ((s = panel_enc(EN_ALGO)) != 0 && !ft_on) {   /* ALGORITHM: the selected track, on every page (not in a take):
+                                                     * 1, 2, 3, then the drum tracks D1, D2, D3 (xdrums.c) */
+        int32_t pos = song.sel < TRK_DRUM ? (int32_t)song.sel : TRK_DRUM + (int32_t)drum_focus;
+        int32_t to = clamp(pos + (s > 0 ? 1 : -1), 0, TRK_DRUM + 2);
+        if (to >= TRK_DRUM && (uint32_t)(to - TRK_DRUM) != drum_focus) {
+            static const char *const DN[3] = {"D1", "D2", "D3"};
+            drum_focus_set((uint32_t)(to - TRK_DRUM));
+            ui_say("DRUM TRACK ", DN[drum_focus]);
+            ui.force = 1;
+        }
+        track_select((uint32_t)(to < TRK_DRUM ? to : TRK_DRUM));
+    }
     if (vis_shown() && !rec_wait && !ft_on) {           /* the visualiser: SELECT its style; KNOB 1..4 (the TRACKS
                                                          * screen's, out of sight) do nothing */
         if ((s = panel_enc(EN_SELECT)) != 0)

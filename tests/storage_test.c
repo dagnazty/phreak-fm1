@@ -67,6 +67,52 @@ static int side_tests(void)                          /* 2.7: the side record (pr
     return bad;
 }
 
+/* sections E..H: four objects in five sectors (storage.c ST_POOL) */
+static int pool_tests(void)
+{
+    static uint8_t v[4][3816], got[3816], before[0x100000];
+    uint32_t i, k, o, step, ok = 1, torn_ok = 1, outside_ok = 1, saved = 0;
+    int n, bad = 0;
+    for (k = 0; k < 4u; k++)
+        bad += check("pool: empty: nothing loads", st_load(OBJ_SECT4 + k, got, sizeof got) == -1);
+    memcpy(before, nor, sizeof nor);
+    srand(7);
+    for (step = 0; step < 400u; step++) {             /* random saves of E..H: each loads its last one */
+        o = (uint32_t)rand() % 4u;
+        memset(v[o], (int)(step & 0xFF), sizeof v[o]);
+        v[o][0] = (uint8_t)o;
+        v[o][1] = (uint8_t)(step >> 8);
+        if (rand() % 5 == 0) {                        /* a torn save: the one before stays */
+            fail_after = rand() % 16;
+            st_save(OBJ_SECT4 + o, v[o], sizeof v[o]);
+            fail_after = -1;
+            memset(v[o], 0, sizeof v[o]);
+            n = st_load(OBJ_SECT4 + o, v[o], sizeof v[o]);   /* (the copy now in charge: an old one, or this) */
+            torn_ok &= n == (int)sizeof v[o] || (n == -1 && !((saved >> o) & 1u));
+            if (n < 0)
+                saved &= ~(1u << o);
+            continue;
+        }
+        if (st_save(OBJ_SECT4 + o, v[o], sizeof v[o]) != 0)
+            ok = 0;
+        saved |= 1u << o;
+        for (k = 0; k < 4u; k++) {
+            n = st_load(OBJ_SECT4 + k, got, sizeof got);
+            if ((saved >> k) & 1u ? n != (int)sizeof got || memcmp(got, v[k], sizeof got) : n != -1)
+                ok = 0;
+        }
+    }
+    for (i = 0; i < sizeof nor; i++)                  /* only the five pool sectors were touched */
+        if (nor[i] != before[i] && !((i >= 0x93000u && i < 0x97000u) || (i >= 0xFB000u && i < 0xFC000u)))
+            outside_ok = 0;
+    bad += check("pool: 400 random saves of E..H load back", ok);
+    bad += check("pool: a torn save leaves a whole copy", torn_ok);
+    bad += check("pool: nothing written outside its five sectors", outside_ok);
+    bad += check("pool: A..D untouched (2.6 erase's project C as it was)",
+                 st_load(OBJ_PROJECT0 + 2u, got, sizeof got) == (int)sizeof got && got[0] == 'P');
+    return bad;
+}
+
 int main(void)
 {
     char a[600], b[600], got[600];
@@ -122,14 +168,19 @@ int main(void)
          * the update staging (0xE0000..0xE4FFF; the FM6 bank's two sectors follow it), and no two sectors shared */
         uint32_t o, c, o2, c2, inside = 1, apart = 1;
         for (o = 0; o < OBJ_COUNT; o++)
-            for (c = 0; c < 2u; c++) {
+            for (c = 0; c < ST_COPIES(o); c++) {
                 uint32_t a = st_sector(o, c);
                 int data = a >= 0x97000u && a + 4096u <= 0xA0000u, ups = a >= 0xDC000u && a + 4096u <= 0xE0000u;
                 int glob = a >= 0xFC000u && a + 4096u <= 0xFF000u, fm6 = a >= 0xE5000u && a + 4096u <= 0xE7000u;
-                inside &= (data || ups || glob || fm6) && !(a & 0xFFFu);
-                for (o2 = 0; o2 < OBJ_COUNT; o2++)
-                    for (c2 = 0; c2 < 2u; c2++)
-                        if ((o2 != o || c2 != c) && st_sector(o2, c2) == a)
+                int pool = ST_POOLED(o) && ((a >= 0x93000u && a + 4096u <= 0x97000u) || a == 0xFB000u);  /* E..H */
+                /* D2, D3 (OBJ_XD0..XDW): the last 12 KiB of each user sample slot, past its 68 KiB of samples */
+                int xdt = o >= OBJ_XD0 && o <= OBJ_XDW &&
+                          ((a >= 0xA0000u + 0x11000u && a + 4096u <= 0xB4000u) || (a >= 0xB4000u + 0x11000u && a + 4096u <= 0xC8000u) ||
+                           (a >= 0xC8000u + 0x11000u && a + 4096u <= 0xDC000u) || (a >= 0xE7000u + 0x11000u && a + 4096u <= 0xFB000u));
+                inside &= (ST_POOLED(o) ? pool : o >= OBJ_XD0 && o <= OBJ_XDW ? xdt : data || ups || glob || fm6) && !(a & 0xFFFu);
+                for (o2 = 0; o2 < OBJ_COUNT; o2++)       /* (the pool's sectors: shared by E..H only, by design) */
+                    for (c2 = 0; c2 < ST_COPIES(o2); c2++)
+                        if ((o2 != o || c2 != c) && st_sector(o2, c2) == a && !(ST_POOLED(o) && ST_POOLED(o2)))
                             apart = 0;
             }
         bad += check("data stays in the Felucca regions (autosave too)", inside);
@@ -166,6 +217,7 @@ int main(void)
                      st_load(OBJ_PROJECT0 + 2u, got3, sizeof got3) == (int)sizeof a2 && !memcmp(got3, a2, sizeof a2));
     }
     bad += side_tests();
+    bad += pool_tests();
     printf("%s\n", bad ? "STORAGE TEST FAILED" : "storage test passed");
     return bad != 0;
 }

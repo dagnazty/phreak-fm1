@@ -6,7 +6,7 @@
 #define FM1_ARRANGER_H
 #include <stdint.h>
 #define ARR_STEPS 16u
-#define ARR_SCENES 4u
+#define ARR_SCENES 8u                     /* A..H */
 #define ARR_NONE (-1)
 #define ARR_DONE (-2)
 #define ARR_INVALID (-3)
@@ -25,7 +25,7 @@ static void arr_defaults(arr_config_t *c)
     uint32_t i;
     c->count = 4; c->loop = 0; c->reserved[0] = c->reserved[1] = 0;
     for (i = 0; i < ARR_STEPS; i++) {
-        c->entry[i].scene = (uint8_t)(i % ARR_SCENES);
+        c->entry[i].scene = (uint8_t)(i % 4u);   /* (the default song A B C D..., as SLOOP's) */
         c->entry[i].bars = 4;
     }
 }
@@ -76,7 +76,7 @@ static int arr_drop_scene(arr_config_t *c, uint32_t scene)
     if (n == count)
         return 0;
     for (i = n; i < ARR_STEPS; i++) {
-        c->entry[i].scene = (uint8_t)(i % ARR_SCENES);
+        c->entry[i].scene = (uint8_t)(i % 4u);   /* (the default song A B C D..., as SLOOP's) */
         c->entry[i].bars = 4;
     }
     c->count = (uint8_t)n;

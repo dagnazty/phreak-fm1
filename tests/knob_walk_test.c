@@ -68,7 +68,7 @@ static uint32_t bad;
 static void turn(uint32_t kn, int32_t d, const char *where)
 {
     char what[256];
-    uint32_t e = enc_of(kn), c, i;
+    uint32_t e = enc_of(kn), c, i, f0 = drum_focus;
     for (i = 0; i < 7u; i++)
         encs[i] = enc_late[i] = 0;
     ui.hot_t = 0, ui.bpm_t = 0, ui.msg_t = 0, ui.arm = 0;
@@ -78,6 +78,9 @@ static void turn(uint32_t kn, int32_t d, const char *where)
     encs[e] = d, enc_late[e] = d;
     frame();
     frame();                                      /* (a detent left for the next pass: read there) */
+    if (drum_focus != f0)
+        drum_focus_set(f0);                       /* (ALGORITHM on the drum track: D1 -> D2 shows another drum track,
+                                                   * its own values (xdrums.c); back, it must leave nothing changed) */
     snap(&s1);
     c = changed(what, sizeof what);
     if (c > 1u) {
@@ -99,6 +102,7 @@ int main(int argc, char **argv)
     host_tracks_init();
     for (i = 0; i < NPART; i++) { set_engine_of(&trk[i], TRK_DEF[i][0]); apply_preset_to(&trk[i], TRK_DEF[i][1]); trk[i].engine = trk[i].eng_req; }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                               /* D2, D3 as main.c sets them */
     for (t = 0; t < NTRK; t++)                    /* a pattern on every track: the REC screen's LENGTH and START */
         for (i = 0; i < 16u; i += 4u) {
             if (t == TRK_DRUM) {

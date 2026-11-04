@@ -26,6 +26,7 @@ static const char *const LAYER_NAME[LY_COUNT] = {"", "punch", "erase", "roll", "
 static void section_store(uint32_t s);                  /* project.c */
 static void section_load(uint32_t s);
 static uint8_t sec_armed;                               /* store over a used section: the key again within 3 s */
+static uint8_t sec_bank;                                /* SAVE + key 15: keys 5..8 store E..H (1) or A..D */
 static uint32_t sec_armed_ms;
 static uint8_t chain_tap[CHAIN_MAX], chain_taps;        /* the section keys tapped in this SAVE hold (the first
                                                          * is asked for at once; two or more: a chain on release) */
@@ -366,12 +367,16 @@ UI_SMALL static void layer_key(uint32_t layer, uint32_t k, uint32_t down)
         ui_say("KEY ", N_NOTE[root]);
         return;
     }
-    case LY_SONG: {                                     /* sections A..D: play, store; loop / song; SONG REC */
+    case LY_SONG: {                                     /* sections A..H: play, store; loop / song; SONG REC */
         char b[2] = {0, 0};
         if (w < 0)
             return;
-        b[0] = (char)('A' + (w & 3));
-        if (w < 4) {
+        if (w >= 8 && w < 12)                           /* keys 9..12 play E..H, as 1..4 play A..D */
+            w -= 4;
+        else if (w >= 4 && w < 8)
+            w += 4;                                     /* (keys 5..8 store: kept apart from the plays below) */
+        b[0] = (char)('A' + (w < 8 ? w : (int32_t)(sec_bank * 4u) + w - 8));
+        if (w < 8) {
             if (arrangement_clock.running) {
                 ui_message("SONG PLAYS");
             } else if (!((arrangement_ready() >> w) & 1u)) {
@@ -392,8 +397,8 @@ UI_SMALL static void layer_key(uint32_t layer, uint32_t k, uint32_t down)
                 section_load((uint32_t)w);
                 ui_say("LOADED ", b);
             }
-        } else if (w < 8) {
-            uint32_t s = (uint32_t)w - 4u;
+        } else if (w < 12) {
+            uint32_t s = (uint32_t)w - 8u + sec_bank * 4u;
             if (((arrangement_ready() >> s) & 1u) && !(sec_armed == s + 1u && fm1_ms - sec_armed_ms < 3000u)) {
                 sec_armed = (uint8_t)(s + 1u);
                 sec_armed_ms = fm1_ms;
@@ -424,6 +429,10 @@ UI_SMALL static void layer_key(uint32_t layer, uint32_t k, uint32_t down)
             }
         } else if (w == 15) {
             studio_open(SC_SONG);
+        } else if (w == 14) {
+            sec_bank ^= 1u;                             /* keys 5..8 store A..D / E..H */
+            sec_armed = 0;
+            ui_message(sec_bank ? "KEYS 5-8 SAVE E-H" : "KEYS 5-8 SAVE A-D");
         }
         return;
     }
@@ -471,7 +480,7 @@ UI_SMALL static void chain_sub(char *sub, uint32_t n)
     str_cpy(sub, "chain", n);
     for (i = 0; i < m && i < CHAIN_MAX && k + 2u < n; i++) {
         sub[k++] = ' ';
-        sub[k++] = (char)('A' + ((chain_taps >= 2u ? chain_tap[i] : chain_sec[i]) & 3u));
+        sub[k++] = (char)('A' + ((chain_taps >= 2u ? chain_tap[i] : chain_sec[i]) & 7u));
     }
     sub[k] = 0;
 }
@@ -562,7 +571,7 @@ UI_SMALL static void layer_knobs(uint32_t layer)
             }
             break;
         case LY_MIX: {
-            int16_t *lv = k == TRK_DRUM ? &song.g[G_DRLVL] : &trk[k].p[P_LEVEL];
+            int16_t *lv = k == TRK_DRUM ? drum_lvl_ptr() : &trk[k].p[P_LEVEL];
             *lv = (int16_t)clamp(*lv + accel(EN_K1 + k, s, 127), 0, 127);
             break;
         }
@@ -992,14 +1001,14 @@ UI_SMALL static void layer_screen_draw(void)
         }
         break;
     }
-    case LY_SONG: {                                     /* A..D (playing lit, next one framed), store, modes */
+    case LY_SONG: {                                     /* A..H (playing lit, next one framed), store, modes */
         uint32_t ready = arrangement_ready();
-        static const char *const SL[4] = {"A", "B", "C", "D"};
+        static const char *const SL[NSECT] = {"A", "B", "C", "D", "E", "F", "G", "H"};
         col = C_WHITE;
         if (srec == 2u) {
             char b[8];
             str_cpy(sub, "rec ", sizeof sub);
-            str_cpy(sub + 4, SL[srec_e[srec_n ? srec_n - 1u : 0u].scene & 3u], 2);
+            str_cpy(sub + 4, SL[srec_e[srec_n ? srec_n - 1u : 0u].scene & 7u], 2);
             str_cpy(sub + str_len(sub), " bar ", 6);
             fmt_int(b, srec_n ? srec_e[srec_n - 1u].bars + 1 : 1);
             str_cpy(sub + str_len(sub), b, 6);
@@ -1008,20 +1017,26 @@ UI_SMALL static void layer_screen_draw(void)
         } else {
             str_cpy(sub, arrangement_enabled ? "song mode" : srec ? "rec armed" : "play  store", sizeof sub);
         }
-        for (i = 0; i < 4u; i++) {                      /* (the chain's next entry framed as the one asked for) */
+        for (i = 0; i < NSECT; i++) {                   /* (the chain's next entry framed as the one asked for) */
+            uint32_t ti = i < 4u ? i : i + 4u, si = sec_bank * 4u + (i & 3u);   /* E..H on keys 9..12 */
             int used = (ready >> i) & 1u, playing = live_sec == (int8_t)i && !arrangement_clock.running;
             int next = live_req == (int8_t)i ||
-                       (chain_n && live_req < 0 && (chain_sec[((chain_i + 1u) % chain_n) % CHAIN_MAX] & 3u) == i);
-            str_cpy(tl[i].lab, SL[i], 8);
-            tl[i].bg = used ? (playing ? TE_COL[i] : TE_DIM[i]) : TE_G1;
-            tl[i].fg = used ? C_BLACK : TE_G3;
-            tl[i].top = next ? C_WHITE : 0;
-            str_cpy(tl[4 + i].lab, "save A", 8);
-            tl[4 + i].lab[5] = (char)('A' + i);
-            tl[4 + i].bg = sec_armed == i + 1u ? TE_RED : TE_G1;
-            tl[4 + i].fg = sec_armed == i + 1u ? C_BLACK : TE_G4;
+                       (chain_n && live_req < 0 && (chain_sec[((chain_i + 1u) % chain_n) % CHAIN_MAX] & 7u) == i);
+            str_cpy(tl[ti].lab, SL[i], 8);
+            tl[ti].bg = used ? (playing ? TE_COL[i & 3u] : TE_DIM[i & 3u]) : TE_G1;
+            tl[ti].fg = used ? C_BLACK : TE_G3;
+            tl[ti].top = next ? C_WHITE : 0;
+            if (i >= 4u)
+                continue;
+            str_cpy(tl[4 + i].lab, "save A", 8);        /* keys 5..8: A..D, or E..H (key 15) */
+            tl[4 + i].lab[5] = (char)('A' + si);
+            tl[4 + i].bg = sec_armed == si + 1u ? TE_RED : TE_G1;
+            tl[4 + i].fg = sec_armed == si + 1u ? C_BLACK : TE_G4;
             tl[4 + i].top = TE_DIM[i];
         }
+        str_cpy(tl[14].lab, sec_bank ? "> A-D" : "> E-H", 8);
+        tl[14].bg = TE_G1;
+        tl[14].fg = TE_G4;
         str_cpy(tl[12].lab, arrangement_enabled ? "song" : "loop", 8);
         tl[12].bg = arrangement_enabled ? C_WHITE : TE_G2;
         tl[12].fg = arrangement_enabled ? C_BLACK : C_WHITE;
@@ -1088,7 +1103,7 @@ UI_SMALL static void hold_screen_draw(void)
         b[6] = (char)('1' + ui.hold_trk);
     } else {
         str_cpy(b, "section A", sizeof b);
-        b[8] = (char)('A' - 1 + clamp(song.g[G_SLOT], 1, 4));
+        b[8] = (char)('A' - 1 + clamp(song.g[G_SLOT], 1, NSECT));
     }
     te_text_c(120, 4, b, TE_G4);
     te_text_c(120, 30, "keep holding", TE_G3);

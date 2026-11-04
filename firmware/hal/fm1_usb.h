@@ -107,6 +107,32 @@ FM1_INLINE void fm1_usb_ep4_send(void *p, uint32_t n)
 }
 FM1_INLINE void fm1_usb_rx_sync(void) { __asm__ volatile("ssync" ::: "memory"); }
 
+/* USB0 as a full-speed host, for the LOAD FROM USB (src/usbstick.c). After the AC79 SDK's
+ * usb_h_sie_init (USB0 branch, cpu.a usb.c): pads off, then digital inputs on with the host's pull-downs and no
+ * pull-up, USB (not GPIO) mode, CON0 PHY_ON | USB_NRST | VBUS with CID low (CID high is the device: fm1_usb_attach
+ * sets 0x3C). DEVCTL and POWER go through the SIE as in usb.c. DP_SE / DM_SE are CON0 bits 17 / 16
+ * (usb_read_dp_se / _dm_se); both 0 = SE0, nothing pulled up = nothing attached. */
+#define FM1_USB_IO_CON1 (*(volatile uint32_t *)0x51004u)
+FM1_INLINE void fm1_usb_host_off(void)
+{
+    FM1_USB_CON0 = 0;
+    FM1_USB_CON1 = 0;
+    FM1_USB_IO_CON0 = 0;
+    FM1_USB_IO_CON1 = 0;
+}
+FM1_INLINE void fm1_usb_host_on(void *ep0)
+{
+    FM1_CLK_CON1 &= ~3u;                                /* USB clock = PLL48M */
+    FM1_USB_EP0_ADR = (uint32_t)(uintptr_t)ep0;
+    FM1_USB_IO_CON0 |= (1u << 10) | (1u << 9);          /* DP / DM digital in */
+    FM1_USB_IO_CON0 &= ~0xC0u;                          /* no pull-ups */
+    FM1_USB_IO_CON0 |= 0x30u;                           /* the host's pull-downs */
+    FM1_USB_IO_CON0 &= ~((1u << 8) | (1u << 11));
+    FM1_USB_CON0 |= 0x25u;                              /* PHY_ON, USB_NRST, VBUS; CID 0 = host */
+}
+FM1_INLINE uint32_t fm1_usb_host_lines(void) { return (FM1_USB_CON0 >> 16) & 3u; }   /* bit 1 DP, bit 0 DM */
+FM1_INLINE void fm1_usb_host_low_speed(void) { FM1_USB_CON0 |= 2u; }
+
 FM1_INLINE void fm1_usb_ep_enable(uint32_t eps) { FM1_USB_CON0 &= ~(eps << 19); }
 
 FM1_INLINE uint32_t fm1_usb_sof_take(void)

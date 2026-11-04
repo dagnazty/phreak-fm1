@@ -3,6 +3,7 @@
  * startup, RAM flash driver and USB stack are still required. TIMER5, audio,
  * settings, samples, projects, editor and normal UI are never started here. */
 static uint32_t recovery_last, recovery_fraction, recovery_usb_last;
+static uint32_t recovery_btn;            /* the buttons held at power-on: OCT+ alone opens LOAD FROM USB */
 
 static void recovery_poll(void)
 {
@@ -54,6 +55,7 @@ static int recovery_key(void)
         fm1_wdt_feed();
         fm1_input_scan();
     } while ((uint32_t)(fm1_ticks() - start) < 50u * 1000u * FM1_TICKS_PER_US);
+    recovery_btn = fm1_in.buttons;
     return bootguard_manual(fm1_in.buttons);
 }
 

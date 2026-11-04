@@ -23,6 +23,7 @@ static void boot_as_main(void)
         track_defaults_steps(t);
     }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
+    xd_defaults();                               /* D2, D3 as main.c sets them */
     song.sel = 0;
     autosave_resume();
     layers_init();
