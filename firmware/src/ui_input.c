@@ -561,6 +561,10 @@ UI_SMALL static void edit_param(uint32_t slot, int32_t steps)
         id = (uint32_t)(vp - TSEL->p);                    /* (PHREAK 1.1: a USR kit's EDIT values sit in other slots) */
     v = d->names == ESYNC_NAMES || d->names == N_IBITS || d->names == N_IRATE ? names_turn(d, *vp, steps)   /* (a name a detent) */
                                     : clamp(*vp + accel(EN_K1 + slot, steps, d->names ? 0 : d->max - d->min), d->min, d->max);
+    if (d->names == SMP_ALL_NAMES)
+        v = smp_set_step(v, steps);                       /* (PHREAK 1.4) SAMPLE SET, GRAIN SRC: past the sets gone */
+    else if (d == &DRUM_KIT_DESC)
+        v = drum_kit_ok(v);                               /* (PHREAK 1.4) KIT: from 808 (0..4 are gone) */
     *vp = (int16_t)v;
     if (pg->scope != SC_GLOBAL && p_lockable(id))
         ui.lock_par = (uint8_t)id;                        /* the SEQ layer's lock parameter: the last one touched */
@@ -1104,10 +1108,17 @@ UI_SMALL static void remote_poll(void)
     fm1_remote_btn = m;
 }
 
+static uint8_t se_on;                                   /* smpedit.c (included at the end) */
+static uint32_t se_lfo_t0;
+static void se_open(void);
+static void se_input(uint32_t pressed, uint32_t home, uint32_t lfo);
+static int rs_input(uint32_t *pressed, uint32_t lfo);   /* (PHREAK 1.8) RESAMPLE: smpedit.c */
+static void rs_poll(void);
 UI_SMALL static void ui_input(void)
 {
     uint32_t pressed = fm1_input_edges(0), notes = fm1_input_note_edges(), now = fm1_ticks(), id, b, k;
     uint32_t home = btn_hold(&ui.home_t0, B_HOME, now, 1);
+    uint32_t lfo = btn_hold(&se_lfo_t0, B_LFO, now, 1);   /* (PHREAK 1.5) LFO held: the SAMPLE EDITOR */
     int32_t s;
     int layered;
     enc_hold = 0;                                       /* (panel.c: every knob readable again this pass) */
@@ -1138,6 +1149,17 @@ UI_SMALL static void ui_input(void)
         thr_req = 0;
         if (!ui.home_t0)
             menu_input(pressed);
+        return;
+    }
+    rs_poll();                                          /* (PHREAK 1.8) a finished take into its slot, when stopped */
+    if (rsm.st != RS_OFF && !se_on && rs_input(&pressed, lfo))
+        return;                                         /* (LFO: RESAMPLE's stop / cancel, not the editor) */
+    if (se_on) {                                        /* (PHREAK 1.5) the SAMPLE EDITOR has the panel */
+        se_input(pressed, home, lfo);
+        return;
+    }
+    if (lfo == BT_HOLD && ly_lock == LY_PLAY && !rec_wait && !ft_on && rsm.st == RS_OFF) {
+        se_open();
         return;
     }
     if (!on_notes_page() && !on_drum_page())
@@ -1275,7 +1297,7 @@ UI_SMALL static void ui_input(void)
          * being edited. Every detent counts */
         uint32_t total, cur = preset_pos(&total);
         if (is_drum(TSEL))
-            TDRUM->p[P_E0] = (int16_t)clamp(TDRUM->p[P_E0] + s, 0, DRUM_KITS - 1);
+            TDRUM->p[P_E0] = (int16_t)drum_kit_ok(TDRUM->p[P_E0] + s);
         else if (total)
             preset_go((uint32_t)(((int32_t)cur + s % (int32_t)total + (int32_t)total) % (int32_t)total));
     }
@@ -1396,3 +1418,5 @@ timeout:
     ui.force = 1;
     ui_message("SETUP CANCELLED");
 }
+
+#include "smpedit.c"          /* PHREAK 1.5: the SAMPLE EDITOR (hold LFO); its SAVE: smpedit_save.c */

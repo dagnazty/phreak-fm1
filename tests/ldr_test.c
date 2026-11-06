@@ -100,7 +100,7 @@ static int ldr_prog(uint32_t off, const void *p, uint32_t n)
 {
     const uint8_t *s = p;
     uint32_t i;
-    if (off < 0x4000u || off + n > 0x93000u || ((off & 0xFFu) + n) > 256u) bad_range++;
+    if (off < 0x4000u || off + n > 0x71000u || ((off & 0xFFu) + n) > 256u) bad_range++;
     for (i = 0; i < n; i++) nor[off + i] &= s[i];
     return 0;
 }
@@ -151,6 +151,7 @@ static void put_record(void)                         /* a valid update record at
     memcpy(nor + 0xE4F00, r, sizeof r);
 }
 
+#define APP_HI 0x71000u                              /* PHREAK 1.4: the app area ends here; USR5, USR6 above */
 int main(int argc, char **argv)
 {
     size_t olen;
@@ -164,14 +165,22 @@ int main(int argc, char **argv)
     nfo = flash_off(logical);
     /* device: OLD installed, plus a valid update record at 0xE4F00 */
     memset(nor, 0xFF, sizeof nor);
-    memcpy(nor, old + ofo, 0x93000);
+    memcpy(nor, old + ofo, APP_HI);
     memcpy(head, nor, sizeof head);
+    for (rc = 0; rc < 0x22000; rc++)
+        nor[APP_HI + (uint32_t)rc] = (uint8_t)(rc * 7 + 3);   /* the user sample slots USR5, USR6 (PHREAK 1.4) */
     put_record();
     rc = ldr_session();
     printf("  rc %d, %u requests, %u sector erases\n", rc, requests, erases);
     bad += check("install completes", rc == 0);
-    bad += check("app area == the new package's flash.bin", !memcmp(nor + 0x4000, logical + nfo + 0x4000, 0x93000 - 0x4000));
+    bad += check("app area == the new package's flash.bin", !memcmp(nor + 0x4000, logical + nfo + 0x4000, APP_HI - 0x4000));
     bad += check("flash head [0, 0x4000) untouched", !memcmp(nor, head, sizeof head));
+    {
+        uint32_t i, same = 1;
+        for (i = 0; i < 0x22000u; i++)
+            same &= nor[APP_HI + i] == (uint8_t)(i * 7u + 3u);
+        bad += check("USR5, USR6 [0x71000, 0x93000) untouched (PHREAK 1.4)", same);
+    }
     bad += check("finish asked (0xF0000000)", f0_asked >= 1);
     bad += check("update record cleared (RAM + flash)", record_cleared && nor[0xE4F06] == 0xFF);
     bad += check("no write outside the allowed windows", bad_range == 0);
@@ -183,7 +192,7 @@ int main(int argc, char **argv)
     {
         uint8_t save = logical[nfo + 0x4000 + 5];
         logical[nfo + 0x4000 + 5] ^= 0x5A;           /* app area head no longer decrypts */
-        memcpy(nor, old + ofo, 0x93000);
+        memcpy(nor, old + ofo, APP_HI);
         erases = 0;
         rc = ldr_session();
         bad += check("foreign key / damaged app head refused, nothing erased", rc == -6 && erases == 0);
@@ -192,16 +201,16 @@ int main(int argc, char **argv)
     /* one bit damaged on the way, once: the CRC sees it, the next pass rewrites that sector */
     {
         const uint8_t r6 = 0x41;                     /* byte 6 of a valid record ("AT"); 0xFF once erased */
-        memcpy(nor, old + ofo, 0x93000);
+        memcpy(nor, old + ofo, APP_HI);
         put_record();
         record_cleared = 0;
         corrupt_at = nfo + 0x30123u;
         corrupt_once = 1;
         rc = ldr_session();
         bad += check("a byte damaged once: caught by the CRC, fixed by a 2nd pass", rc == 0 && record_cleared
-                     && nor[0xE4F06] == 0xFF && !memcmp(nor + 0x4000, logical + nfo + 0x4000, 0x93000 - 0x4000));
+                     && nor[0xE4F06] == 0xFF && !memcmp(nor + 0x4000, logical + nfo + 0x4000, APP_HI - 0x4000));
         /* the package itself damaged (every pass): the record stays, nothing is booted */
-        memcpy(nor, old + ofo, 0x93000);
+        memcpy(nor, old + ofo, APP_HI);
         put_record();
         record_cleared = 0;
         corrupt_at = nfo + 0x30123u;
@@ -223,14 +232,14 @@ int main(int argc, char **argv)
     }
     /* another flash chip: nothing written, the records go (the old firmware starts again) */
     {
-        memcpy(nor, old + ofo, 0x93000);
+        memcpy(nor, old + ofo, APP_HI);
         put_record();
         record_cleared = 0;
         erases = 0;
         flash_unknown = 1;
         rc = ldr_session();
         bad += check("unknown flash chip: nothing written, record dropped", rc == -14 && record_cleared && erases == 1
-                     && nor[0xE4F06] == 0xFF && !memcmp(nor, old + ofo, 0x93000));
+                     && nor[0xE4F06] == 0xFF && !memcmp(nor, old + ofo, APP_HI));
         flash_unknown = 0;
     }
     printf("%s\n", bad ? "LOADER TEST FAILED" : "loader test passed");

@@ -18,6 +18,8 @@
  *           section taps: a chain, "chain A B" on the sub line)
  *   DRUMS   the grid: sound / step / hit / level knobs, GRID <-> KIT
  * then 20000 frames of random use: every draw stays on the screen. */
+static unsigned int host_slots[6u * 0x14000u / 4u];   /* the user sample slots (PHREAK 1.5: the SAMPLE EDITOR's screens) */
+#define SMP_USER_XIP(k) ((const unsigned char *)host_slots + (k) * SMP_USER_SIZE)
 #define FELUCCA_ARRANGER 1
 #define main hostsim_main
 #include "hostsim.c"
@@ -86,6 +88,7 @@ static void settings_save(void) {}
 #include "../firmware/src/ui_vis.c"
 #include "../firmware/src/ui_layers.c"
 #include "../firmware/src/ui_menu.c"
+#define SE_SAVE_LATER 1                                /* (PHREAK 1.6: the editor's preview and SAVE, smpedit_save.c below) */
 #include "../firmware/src/ui_input.c"
 #include "../firmware/src/splash.c"
 /* (2.7) the theme's CRC: storage.c's st_crc32 (its flash hooks unused here) */
@@ -93,6 +96,15 @@ static int st_read(uint32_t off, void *dst, uint32_t n) { (void)off, (void)dst, 
 static int st_erase(uint32_t off) { (void)off; return -1; }
 static int st_prog(uint32_t off, const void *src, uint32_t n) { (void)off, (void)src, (void)n; return -1; }
 #include "../firmware/src/storage.c"
+/* (PHREAK 1.6) the SAMPLE EDITOR's SAVE and preview (smpedit_save.c): the flash on the RAM slots, no audio IRQ here */
+#define FM1_IRQ_ALNK0 11u
+static void fm1_irq_mask(uint32_t n) { (void)n; }
+static void fm1_irq_unmask(uint32_t n) { (void)n; }
+static void fm1_delay_us(uint32_t us) { (void)us; }
+static int fl_erase4k_quiet(uint32_t off, uint32_t *took) { (void)off, (void)took; return -1; }
+static int fl_write(uint32_t off, const uint8_t *src, uint32_t n) { (void)off, (void)src, (void)n; return -1; }
+static void ed_smp_inval(uint32_t k) { (void)k; }
+#include "../firmware/src/smpedit_save.c"
 /* (2.7) the editor's LIVE page (firmware/src/editor_live.c): its reply captured here */
 static uint8_t lv_out[96];
 static uint32_t lv_n;
@@ -1621,9 +1633,12 @@ int main(int argc, char **argv)
             frame();
             check(trk[1].eng_req == BANK[0].e && trk[1].preset == bank_pi[0] && !strncmp(ui.msg, "T2 PROG 0", 9),
                   "MIDI Program Change 0: track 2 takes the first sound of the PRESETS list (T2 PROG 0)");
-            pc_req[3] = 3;                                /* PC 2 on the drum channel: kit 2 */
+            pc_req[3] = 3;                                /* PC 2 on the drum channel: kit 2, gone (PHREAK 1.4): nothing */
             frame();
-            check(TDRUM->p[P_E0] == 2, "MIDI Program Change on the drum channel: kit 2");
+            check(TDRUM->p[P_E0] == k0, "MIDI Program Change on the drum channel: kit 2 is gone, the kit stays");
+            pc_req[3] = 8;                                /* PC 7 on the drum channel: kit 7 */
+            frame();
+            check(TDRUM->p[P_E0] == 7, "MIDI Program Change on the drum channel: kit 7");
             pc_req[1] = (uint8_t)(tot + 1u);              /* past the end: nothing */
             k = trk[1].eng_req;
             frame();
@@ -2123,6 +2138,117 @@ int main(int argc, char **argv)
         }
         fm1_in.buttons = 0; fm1_in.notes = 0; frames(4);
         #undef R
+    }
+    {   /* PHREAK 1.5: the SAMPLE EDITOR. LFO held: it opens on the slot the track plays; a tap: the next page;
+         * HOME: it closes (no edits: at once); the LFO pages still open on a tap */
+        se_on = 0; ui.menu = 0; ly_lock = LY_PLAY; rec_wait = 0; go_home(); frames(2);
+        song.sel = 0;
+        TSEL->eng_req = 4;                                   /* SAMPLE */
+        TSEL->p[P_E0] = (int16_t)(SMP_USR0 + 4u);            /* SET USR5 */
+        {                                                    /* USR5: one zone, a sine that grows, 1 s (IMA from 0 / 0) */
+            uint8_t *img = (uint8_t *)host_slots + 4u * SMP_USER_SIZE, *d = img + SMP_USER_DATA;
+            smp_user_hdr_t *h = (smp_user_hdr_t *)img;
+            int32_t pred = 0, idx = 0;
+            uint32_t i, half = 0, o = 0;
+            memset(img, 0xFF, SMP_USER_SIZE);
+            memset(h, 0, sizeof *h);
+            for (i = 0; i < 22050u; i++) {
+                int32_t x = (int32_t)(sin(i * 2.0 * 3.14159265 / 90.0) * 26000.0 * exp(-3.0 * i / 22050.0) * (i < 300u ? i / 300.0 : 1.0));
+                int32_t step = IMA_STEP[idx], df = x - pred, vd = step >> 3;
+                uint32_t code = 0;
+                if (df < 0) code = 8, df = -df;
+                if (df >= step) code |= 4, df -= step, vd += step;
+                if (df >= step >> 1) code |= 2, df -= step >> 1, vd += step >> 1;
+                if (df >= step >> 2) code |= 1, vd += step >> 2;
+                pred = clamp(pred + ((code & 8u) ? -vd : vd), -32768, 32767);
+                idx = clamp(idx + IMA_IDX[code & 7u], 0, 88);
+                if (!half) half = 0x10u | code; else d[o++] = (uint8_t)((half & 15u) | code << 4), half = 0;
+            }
+            h->magic = SMP_USER_MAGIC, h->version = 1, h->nz = 1;
+            memcpy(h->name, "PLUCK", 6);
+            h->zone[0] = (smp_zone_t){0, 22050, 0, 22049, 1u << 15, 60 * 16, 0, 0, 0, 127, 0};
+            h->data_len = o;
+            smp_user_scan(4);
+        }
+        press(B_LFO); frames(50); release(B_LFO); frames(2);
+        check(se_on && se_k == 4u && se_page == 0u && se_nz == 1u, "SAMPLE EDITOR: LFO held opens it on the track's slot (USR5), page TRIM");
+        se_z[0].st = 1500, se_z[0].en = 18000, se_z[0].fin = 40, se_z[0].fout = 500;   /* (as the knobs would) */
+        se_z[0].looped = 2, se_z[0].ls = 6000, se_z[0].le = 9000, se_dirty = 1, se_draw_ok = 0;
+        ui.force = 1; frame(); ppm("smpedit-trim");
+        tap(B_LFO); frames(2);
+        check(se_on && se_page == 1u, "SAMPLE EDITOR: LFO tapped: the next page (LOOP)");
+        ui.force = 1; frame(); ppm("smpedit-loop");
+        tap(B_LFO); frames(2); ui.force = 1; frame(); ppm("smpedit-keys");
+        tap(B_LFO); frames(2); ui.force = 1; frame(); ppm("smpedit-fx");
+        tap(B_LFO); frames(2);
+        check(se_page == SE_PG_RS, "SAMPLE EDITOR: the fifth page: RESAMPLE (PHREAK 1.8)");
+        ui.force = 1; frame(); ppm("smpedit-resample");
+        tap(B_LFO); frames(2);
+        check(se_page == 0u, "SAMPLE EDITOR: five pages, round again");
+        tap(B_PLAY); frames(2);
+        check(se_on && se_pv.on && se_dly_off && !song.playing && !transport_req,
+              "SAMPLE EDITOR: PLAY hears the zone as edited (the song not started)");
+        ui.force = 1; frame(); ppm("smpedit-preview");
+        tap(B_PLAY); frames(2);
+        check(!se_pv.on && !se_dly_off, "SAMPLE EDITOR: PLAY again stops it, the delay line given back");
+        tap(B_HOME); frames(3);
+        check(se_on && se_arm == 1u, "SAMPLE EDITOR: with edits, HOME once: AGAIN: DISCARD");
+        se_dirty = 0;
+        tap(B_HOME); frames(3);
+        check(!se_on, "SAMPLE EDITOR: HOME leaves (nothing edited)");
+        tap(B_LFO); frames(2);
+        check(!se_on && cur_fam() == FAM_LFO, "LFO tapped: the LFO pages as before");
+        go_home(); frames(2);
+    }
+    {   /* PHREAK 1.8: RESAMPLE. The page's REC arms a take (over a sample: a second time), the editor closes, the banner
+         * shows over the pages; LFO held drops the take; a finished take is written once the transport stops */
+        se_on = 0; ui.menu = 0; ly_lock = LY_PLAY; rec_wait = 0; go_home(); frames(2);
+        press(B_LFO); frames(50); release(B_LFO); frames(2);
+        tap(B_OCTDN); frames(2);
+        check(se_on && se_page == SE_PG_RS && se_k == 4u, "RESAMPLE: OCT- from TRIM: the RESAMPLE page (USR5)");
+        encs[panel.enc[EN_K2]] = 1; frame(); frames(2);
+        check(rs_cfg_bars == 1u, "RESAMPLE: BARS turned: 1");
+        tap(B_REC); frames(2);
+        check(se_on && se_arm == 3u && rsm.st == RS_OFF, "RESAMPLE: over a sample, REC once: AGAIN: REPLACE");
+        tap(B_REC); frames(2);
+        check(!se_on && rsm.st == RS_ARMED && rsm.k == 4u && rs_dly_half && rsm.rate2 && rsm.start == RS_START_PLAY &&
+                  rsm.want == 4u * BEAT_U / (uint32_t)song.g[G_BPM],
+              "RESAMPLE: REC again: armed on USR5 (22 kHz, PLAY, 1 bar at the tempo), the delay on its half");
+        frames(2); ui.force = 1; frame(); ppm("resample-armed");
+        check(rs_shown, "RESAMPLE: the banner over the page");
+        press(B_LFO); frames(50); release(B_LFO); frames(2);
+        check(!se_on, "RESAMPLE: LFO held while armed does not open the editor");
+        check(rsm.st == RS_OFF && !rs_dly_half, "RESAMPLE: ... it drops the take, the delay line whole");
+        frames(2);
+        check(!rs_shown, "RESAMPLE: the banner gone");
+        rsm.st = RS_REC, rsm.start = RS_START_NOW, rsm.want = 0, rsm.k = 4, rsm.out = 52000, rsm.rate2 = 1, rsm.peak = 21000, rs_dly_half = 1;   /* (as the audio side) */
+        frames(1); ui.force = 1; frame(); ppm("resample-rec");
+        song.playing = 1;                                    /* (so the take waits once stopped) */
+        tap(B_LFO); frames(2);
+        check(rsm.st == RS_DONE && !se_on, "RESAMPLE: LFO tapped while recording: the take stops (the song plays on)");
+        frames(3);
+        check(rsm.st == RS_DONE, "RESAMPLE: done while the song plays: it waits");
+        song.playing = 0;
+        frames(3);
+        check(rsm.st == RS_OFF && !rs_dly_half && !se_on, "RESAMPLE: stopped: written (here the flash refuses: said, the line back)");
+        go_home(); frames(2);
+    }
+    {   /* PHREAK 1.9: the user slots are sounds of their own in PRESETS: the last six, kind USR, SAMPLE on USR1..USR6 */
+        uint32_t k, e, total;
+        go_home(); frames(2);
+        song.sel = 0;
+        check(!preset_go_to(TSEL, NBANK - 6u) && TSEL->eng_req == 4 && TSEL->p[P_E0] == (int16_t)SMP_USR0 &&
+                  smp_src(TSEL->p[P_E0]) == SMP_USR0,
+              "PRESETS: USR1 is a sound: SAMPLE playing slot USR1");
+        check(!preset_go_to(TSEL, NBANK - 1u) && TSEL->p[P_E0] == (int16_t)(SMP_USR0 + 5u), "PRESETS: USR6 plays slot USR6");
+        e = base_at(NBANK - 2u, &k);
+        check(e == 4 && !strcmp(base_kind(NBANK - 2u), "USR") && !strcmp(ENGINES[e]->presets[k].name, "USR5"),
+              "PRESETS: listed as USR, by slot");
+        preset_go_to(TSEL, 0);
+        (void)base_pos(&total);
+        check(preset_at((preset_pos(&total) + total - 1u) % total, &k) == 4 && !strcmp(ENGINES[4]->presets[k].name, "USR6") ||
+                  up_count(),
+              "PRESETS: one turn left of the first sound: USR6");
     }
     printf("ui: %s\n", fails ? "FAILED" : "pages, layers (punch, steps, erase, roll, key, mix), layer lock, song layer, REC hold, drums, REC, 20000-frame fuzz PASS");
     return fails;

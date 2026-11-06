@@ -100,14 +100,14 @@ typedef struct {
 } gr_part_t;
 /* (its state: the part's engine arena, engines.c eng_arena_of) */
 
-static uint32_t gr_nz(uint32_t src) { return src < SMP_NSETS ? SMP_SETS[src].nz : usr_nz[(src - SMP_NSETS) % SMP_USER_SLOTS]; }
+static uint32_t gr_nz(uint32_t src) { return src < SMP_NSETS ? SMP_SETS[src].nz : usr_nz[(src - SMP_USR0) % SMP_USER_SLOTS]; }
 static const smp_zone_t *gr_zone(uint32_t src, uint32_t zl)
 {
-    return src < SMP_NSETS ? &SMP_ZONES[SMP_SETS[src].z0 + zl] : &usr_zone[(src - SMP_NSETS) % SMP_USER_SLOTS][zl & 15u];
+    return src < SMP_NSETS ? &SMP_ZONES[SMP_SETS[src].z0 + zl] : &usr_zone[(src - SMP_USR0) % SMP_USER_SLOTS][zl & 15u];
 }
 static uint32_t gr_stamp(uint32_t src)
 {
-    return src < SMP_NSETS ? 0u : usr_nz[(src - SMP_NSETS) % SMP_USER_SLOTS] ? smp_user_gen : 0xFFFFFFFFu;
+    return src < SMP_NSETS ? 0u : usr_nz[(src - SMP_USR0) % SMP_USER_SLOTS] ? smp_user_gen : 0xFFFFFFFFu;
 }
 static inline uint32_t gr_rnd(gr_part_t *P) { return noise32(&P->rng); }
 static inline uint32_t gr_scale(uint32_t n, uint32_t f16) { return (n >> 16) * f16 + (((n & 0xFFFFu) * f16) >> 16); }
@@ -360,7 +360,7 @@ static void grain_note_on(track_t *t, voice_t *v)
 {
     gr_part_t *P = (gr_part_t *)eng_arena_of(t, ENGI_GRAIN);
     uint32_t vi = (uint32_t)(v - t->v) % NVOICE, i;
-    v->s[0] = gr_find((uint32_t)t->p[P_E0] % SMP_NALL, v->note);
+    v->s[0] = gr_find(smp_src(t->p[P_E0]), v->note);
     v->s[1] = 0;                                    /* the first grain at once */
     if (!v->env) {                                  /* a fresh voice: no grains left from before */
         for (i = 0; i < GR_NG; i++)
@@ -375,7 +375,7 @@ static void grain_note_on(track_t *t, voice_t *v)
 static void grain_block(track_t *t)
 {
     gr_part_t *P = (gr_part_t *)eng_arena_of(t, ENGI_GRAIN);
-    uint32_t src = (uint32_t)t->p[P_E0] % SMP_NALL, st = gr_stamp(src), i, held = 0;
+    uint32_t src = smp_src(t->p[P_E0]), st = gr_stamp(src), i, held = 0;
     if (!P->rng)
         P->rng = 0x2545F491;
     if (P->src != src + 1u || P->stamp != st) {
@@ -402,7 +402,7 @@ static void grain_render(track_t *t, voice_t *v, int32_t *out, uint32_t n, const
     int32_t zl = v->s[0], acc[CTL], lp, y = v->s[2];
     if (n > CTL)
         n = CTL;
-    if (zl < 0 || zl >= P->nz || P->src != (uint32_t)p[P_E0] % SMP_NALL + 1u) {
+    if (zl < 0 || zl >= P->nz || P->src != smp_src(p[P_E0]) + 1u) {
         if (zl < 0)
             v->active = 0;                          /* a user slot key with no zone: silent */
         return;
@@ -437,16 +437,13 @@ static void grain_render(track_t *t, voice_t *v, int32_t *out, uint32_t n, const
 
 static const preset_t GRAIN_PRESETS[] = {
     /* name, {SRC, POS, SIZE, DENS, PTCH, SPRD, RAND, TONE}, {A D S R}, fenv, mono.
-     * SRC: the SAMPLE sets (0 PIANO, 2 VIBES, 5 FLUTE...: tools/gen_samples.py CC0_SETS) */
+     * SRC: the SAMPLE sets (0 PIANO, 1 BASS: tools/gen_samples.py). PHREAK 1.4: VIBE HAZE, FLUTE DUST, STR CLOUD and
+     * HORN CLOUD went with their sets; DRONE grains the bass */
     {"LOFI CLOUD", {0, 45, 95, 85, 0, 35, 12, 80}, {70, 90, 120, 90}, 0, 0, FX(0, 45, 20, 70)},
-    {"VIBE HAZE", {2, 30, 100, 90, 0, 25, 10, 90}, {50, 100, 120, 95}, 0, 0, FX(0, 40, 25, 75)},
-    {"FLUTE DUST", {5, 50, 108, 72, 0, 10, 10, 85}, {50, 100, 127, 100}, 0, 0, FX(0, 30, 20, 70)},
-    /* SLOOP 2.5: strings as a cloud, a piano shimmer an octave up, a dark horn drone */
-    {"STR CLOUD", {4, 40, 100, 90, 0, 30, 12, 80}, {70, 100, 120, 95}, 0, 0, FX(0, 50, 20, 75)},
+    /* SLOOP 2.5: a piano shimmer an octave up, a dark drone */
     {"SHIMMER", {0, 30, 90, 95, 12, 40, 15, 110}, {60, 100, 120, 100}, 0, 0, FX(0, 40, 35, 85)},
-    {"DRONE", {3, 50, 115, 80, -12, 20, 20, 50}, {90, 100, 127, 100}, 0, 0, FX(0, 30, 15, 70)},
+    {"DRONE", {1, 50, 115, 80, 0, 20, 20, 50}, {90, 100, 127, 100}, 0, 0, FX(0, 30, 15, 70)},
     {"PNO FREEZE", {0, 40, 127, 127, 0, 5, 0, 100}, {80, 100, 127, 100}, 0, 0, FX(0, 30, 20, 75)},
-    {"HORN CLOUD", {3, 30, 100, 90, 0, 30, 15, 90}, {70, 100, 120, 95}, 0, 0, FX(0, 40, 20, 70)},
 };
 
 static const engine_t ENG_GRAIN = {

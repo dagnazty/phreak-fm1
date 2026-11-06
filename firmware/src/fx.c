@@ -6,6 +6,20 @@
 #define CHO_LEN 2048u
 static int16_t dly_buf[DLY_LEN] __attribute__((section(".pool")));
 static int16_t cho_buf[CHO_LEN] __attribute__((section(".pool")));
+#include "smpedit_pv.c"     /* PHREAK 1.6: the SAMPLE EDITOR's preview (it borrows dly_buf: se_dly_off) */
+/* PHREAK 1.8: RESAMPLE (resample.c, before mix_block; the page: smpedit.c; the write: smpedit_save.c). While a take
+ * is armed or recorded the delay runs on dly_buf's upper half (rs_dly_half): the take is in the lower half */
+enum { RS_OFF, RS_ARMED, RS_REC, RS_DONE };
+enum { RS_START_PLAY, RS_START_NOW, RS_START_NOTE };
+static struct {
+    volatile uint8_t st;                             /* RS_*: the main loop arms (RS_ARMED) and writes (RS_DONE -> OFF) */
+    uint8_t k, rate2, start, dry;                    /* as armed: the slot, 22 kHz (1), START, SOURCE DRY (1) */
+    volatile uint8_t stop_req, clip;                 /* REC tapped; a sample hit full scale */
+    uint32_t want, got, out;                         /* source frames to take (0: until full / REC), taken; samples kept */
+    int32_t pred, idx, acc;                          /* the encoder; 22 kHz: the pair's first sample */
+    volatile int32_t peak;                           /* the take's peak so far (the banner's meter) */
+} rsm;
+static volatile uint8_t rs_dly_half;
 /* the reverb: two input diffusers, then four delay lines mixed by a Hadamard matrix (a feedback delay
  * network: every echo feeds all four, so it thickens instead of ringing like a comb), damped in the
  * loop, one line slowly modulated (no metallic tone on long tails); left and right take different lines */
@@ -196,7 +210,8 @@ static inline void master_pre(int32_t *l, int32_t *r)
 static uint32_t delay_samples(void)
 {
     uint32_t s = dly_samples((uint32_t)song.g[G_DTIME]);
-    return s < 16u ? 16u : s >= DLY_LEN ? DLY_LEN - 1u : s;
+    uint32_t top = rs_dly_half ? DLY_LEN / 2u - 1u : DLY_LEN - 1u;   /* (PHREAK 1.8: RESAMPLE has the lower half) */
+    return s < 16u ? 16u : s >= top ? top : s;
 }
 
 /* process the three buses for one block; sends in, wet out (stereo). The LFOs (chorus, reverb line)
@@ -206,6 +221,7 @@ static void fx_buses(const int32_t *cho_in, const int32_t *dly_in, const int32_t
                      int32_t *wet_r, uint32_t n)
 {
     uint32_t i, k, dl = delay_samples();
+    const uint32_t dbase = rs_dly_half ? DLY_LEN / 2u : 0u, dmask = rs_dly_half ? DLY_LEN / 2u - 1u : DLY_LEN - 1u;
     int32_t fb = song.g[G_DFDBK] * 230, col = 2000 + song.g[G_DCOLOR] * 240;
     if (thr_dly && fb < 89 * 230)                       /* ECHO THROW: FDBK at least 70 %, gliding with it (2.6) */
         fb += ((89 * 230 - fb) * thr_dly) >> 15;
@@ -241,10 +257,14 @@ static void fx_buses(const int32_t *cho_in, const int32_t *dly_in, const int32_t
         }
         fx.cho_w++;
         /* delay with a low-passed feedback (in the middle) */
-        x = dly_buf[(fx.dly_w - dl) & (DLY_LEN - 1u)];
-        fx.dly_lp += mulq15(x - fx.dly_lp, col);
-        dly_buf[fx.dly_w & (DLY_LEN - 1u)] =
-            (int16_t)clamp((dly_in[i] >> 1) + mulq15(fx.dly_lp, fb), -32768, 32767);
+        if (!se_dly_off) {                         /* (PHREAK 1.6: the SAMPLE EDITOR has the line: silent) */
+            x = dly_buf[dbase + ((fx.dly_w - dl) & dmask)];
+            fx.dly_lp += mulq15(x - fx.dly_lp, col);
+            dly_buf[dbase + (fx.dly_w & dmask)] =
+                (int16_t)clamp((dly_in[i] >> 1) + mulq15(fx.dly_lp, fb), -32768, 32767);
+        } else {
+            x = 0;
+        }
         fx.dly_w++;
         x = mulq15(x << 1, dmix);
         yl += x;
@@ -866,7 +886,9 @@ static void mix_drums(uint32_t n, mixacc_t *mx)
     } else {
         slicer_drums(mx->l, mx->r, mx->sr, mx->sd, n);   /* drums_render, through the SLICER when on */
     }
-    click_render(mx->l, mx->r, n);                        /* the metronome: its own voice (drums.c), any kit, any mute */
+    if (rsm.st != RS_REC && !(rsm.st == RS_ARMED && rsm.start == RS_START_NOTE))   /* (1.8: not in a take, nor its trigger) */
+        click_render(mx->l, mx->r, n);                    /* the metronome: its own voice (drums.c), any kit, any mute */
+    se_pv_render(mx->l, mx->r, n);                        /* (PHREAK 1.6) the SAMPLE EDITOR's preview */
 }
 
 /* the units of mask into the set mx, in their order */
@@ -1175,6 +1197,8 @@ static void texture_mix(int32_t *l, int32_t *r, uint32_t n)
         texture_reset(src);                             /* faded out: the new source from rest */
 }
 
+#include "resample.c"        /* PHREAK 1.8: RESAMPLE, the take */
+
 static void mix_block(int32_t *out, uint32_t n)
 {
     uint32_t i, c1;
@@ -1187,6 +1211,7 @@ static void mix_block(int32_t *out, uint32_t n)
         thr_rev = (q & 1u) ? (thr_rev + 1928 > 32767 ? 32767 : thr_rev + 1928) : (thr_rev > 1928 ? thr_rev - 1928 : 0);
         thr_dly = (q & 2u) ? (thr_dly + 1928 > 32767 ? 32767 : thr_dly + 1928) : (thr_dly > 1928 ? thr_dly - 1928 : 0);
     }
+    rs_block_begin(n);                                  /* (1.8: RESAMPLE's start on the grid, its stops) */
     events_block(n);
     duck_block(n * (uint32_t)song.g[G_BPM]);
     c1 = cpu1_on() ? units_split() : 0;                 /* core 1's units this block */
@@ -1219,6 +1244,7 @@ static void mix_block(int32_t *out, uint32_t n)
                                                          * (what it adds does not depend on them: the same sum) */
     punch_freeze_feed(acc[0].sr, mix_l, mix_r, n);     /* punch-in FREEZE: the whole dry mix into the held reverb */
     fx_buses(acc[0].sc, acc[0].sd, acc[0].sr, wet_l, wet_r, n);
+    rs_tap(mix_l, mix_r, n, 1);                         /* (1.8: RESAMPLE, SOURCE DRY) */
     for (i = 0; i < n; i++) {
         mix_l[i] += wet_l[i];
         mix_r[i] += wet_r[i];
@@ -1226,6 +1252,7 @@ static void mix_block(int32_t *out, uint32_t n)
     dust_process(mix_l, mix_r, n);
     punch_process(mix_l, mix_r, n);
     djf_process(mix_l, mix_r, n);
+    rs_tap(mix_l, mix_r, n, 0);                         /* (1.8: RESAMPLE, SOURCE MIX: before MASTER) */
     m1 = (int32_t)song.master_q12;
     m0 = master_cur < 0 ? m1 : master_cur;
     master_cur = m1;

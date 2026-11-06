@@ -36,20 +36,41 @@ static uint32_t pow2_q16(int32_t d16)
 }
 
 /* ---- user sample slots (loaded from the web editor into flash, see web/EDITOR_PROTOCOL.md)
- * 4 slots of 68 KiB (80 up to 2.8.4): 3 at flash 0xA0000.., USR4 at 0xE7000 (Felucca data regions), read through the plain XIP
- * window. Slot = header (magic, count, name, data length, CRC32) + up to 16 zones in the
+ * 6 slots of 68 KiB (80 up to 2.8.4): 3 at flash 0xA0000.., USR4 at 0xE7000 (Felucca data regions), (PHREAK 1.4) USR5,
+ * USR6 at 0x71000 and 0x82000, the flash the built-in sets VIBES .. PERC took (the app area ends at 0x71000 now: the
+ * update loader leaves the slots alone, tools/fm1pkg_make.py APP_END), read through the plain XIP window. Slot = header (magic, count, name, data length, CRC32) + up to 16 zones in the
  * smp_zone_t layout (off relative to the slot's data at +512) + IMA ADPCM data. */
 #include "../hal/fm1_xip.h"   /* relative: hostsim includes this file too */
-#define SMP_USER_SLOTS 4
+#define SMP_USER_SLOTS 6
 #define SMP_USER_BASE 0xA0000u                      /* USR1..USR3: 0xA0000..0xDBFFF */
 #define SMP_USER4_BASE 0xE7000u                     /* USR4 (2.4): the free flash after the FM6 bank, 0xE7000..0xFAFFF */
 #define SMP_USER_SIZE (68u * 1024u)                    /* 68 KiB (80 up to 2.8.4: the last 12 KiB of each slot keep the
                                                      * extra drum tracks D2, D3: storage.c ST_XD_SECTOR) */
 #define SMP_USER_STRIDE 0x14000u                    /* where the slots start: 80 KiB apart, as up to 2.8.4 */
-#define SMP_USER_OFF(k) ((k) < 3u ? SMP_USER_BASE + (k) * SMP_USER_STRIDE : SMP_USER4_BASE)
+#define SMP_USER5_BASE 0x71000u                     /* USR5, USR6 (PHREAK 1.4): 0x71000..0x92FFF, above the app area */
+#define SMP_USER_OFF(k) ((k) < 3u ? SMP_USER_BASE + (k) * SMP_USER_STRIDE : (k) == 3u ? SMP_USER4_BASE : \
+                         SMP_USER5_BASE + ((k) - 4u) * SMP_USER_SIZE)
 #define SMP_USER_DATA 512u
 #define SMP_USER_MAGIC 0x504D5346u                  /* "FSMP" */
-#define SMP_NALL (SMP_NSETS + SMP_USER_SLOTS)
+/* SET numbers (P_E0, also GRAIN's SRC): the built-in sets from 0, USR1.. from SMP_USR0 = 8, where they were when
+ * there were 8 built-in sets (PHREAK 1.4 keeps PIANO 0 and BASS 1: projects and presets keep their numbers). The
+ * numbers between (VIBES .. PERC, gone) play PIANO; the knob skips them (smp_set_step) */
+#define SMP_USR0 8u
+#define SMP_NALL (SMP_USR0 + SMP_USER_SLOTS)
+_Static_assert(SMP_NSETS <= SMP_USR0, "built-in sets below USR1");
+/* a SET value -> a set (< SMP_NSETS) or SMP_USR0 + slot */
+static inline uint32_t smp_src(int32_t v)
+{
+    uint32_t u = (uint32_t)v % SMP_NALL;
+    return u >= SMP_NSETS && u < SMP_USR0 ? 0u : u;
+}
+/* the SET knob: one step past the numbers no set has */
+static int32_t smp_set_step(int32_t v, int32_t dir)
+{
+    if (v >= (int32_t)SMP_NSETS && v < (int32_t)SMP_USR0)
+        v = dir > 0 ? (int32_t)SMP_USR0 : (int32_t)SMP_NSETS - 1;
+    return v;
+}
 typedef struct {
     uint32_t magic;
     uint16_t version;
@@ -60,7 +81,8 @@ typedef struct {
 } smp_user_hdr_t;                                   /* 32 + 16 x 28 = 480 B, data at +512 */
 static smp_zone_t usr_zone[SMP_USER_SLOTS][16];     /* RAM copy, off rebased onto SMP_DATA */
 static uint8_t usr_nz[SMP_USER_SLOTS];
-static const char *const SMP_ALL_NAMES[SMP_NALL] = {SMP_SET_NAMES_INIT, "USR1", "USR2", "USR3", "USR4"};
+static const char *const SMP_ALL_NAMES[SMP_NALL] = {SMP_SET_NAMES_8,   /* (the numbers between: set 0's name) */
+                                                    "USR1", "USR2", "USR3", "USR4", "USR5", "USR6"};
 
 #ifndef SMP_USER_XIP                                /* host tests: a RAM image of the slots */
 #define SMP_USER_XIP(k) fm1_xip_ptr(SMP_USER_OFF((uint32_t)(k)))
@@ -110,7 +132,7 @@ static void smp_user_scan(uint32_t k)
 /* zone index in a voice: < 0x8000 built-in, else 0x8000 | slot << 5 | zone */
 static inline const smp_zone_t *smp_zone(uint32_t zi)
 {
-    return zi < 0x8000u ? &SMP_ZONES[zi] : &usr_zone[(zi >> 5) & 3u][zi & 31u];
+    return zi < 0x8000u ? &SMP_ZONES[zi] : &usr_zone[((zi >> 5) & 7u) % SMP_USER_SLOTS][zi & 31u];
 }
 
 /* voice: ph[0] position (samples), ph[1] fraction Q16, s[0] predictor, s[1] step
@@ -140,7 +162,7 @@ static inline int32_t sample_next(const smp_zone_t *z, voice_t *v, int loop)
 
 static void sample_note_on(track_t *t, voice_t *v)
 {
-    uint32_t si = (uint32_t)t->p[P_E0] % SMP_NALL, i, zi = 0xFFFFu;
+    uint32_t si = smp_src(t->p[P_E0]), i, zi = 0xFFFFu;
     if (si < SMP_NSETS) {
         const smp_set_t *set = &SMP_SETS[si];
         for (i = 0; i < set->nz; i++)
@@ -148,7 +170,7 @@ static void sample_note_on(track_t *t, voice_t *v)
                 zi = set->z0 + i;
         v->s[4] = (int32_t)(zi == 0xFFFFu ? set->z0 : zi);
     } else {                                        /* user slot: silent if empty */
-        uint32_t k = si - SMP_NSETS;
+        uint32_t k = si - SMP_USR0;
         for (i = 0; i < usr_nz[k]; i++)
             if (v->note >= usr_zone[k][i].lo && v->note <= usr_zone[k][i].hi)
                 zi = 0x8000u | k << 5 | i;

@@ -239,7 +239,7 @@ static void xd_apply(const xd_ext_t *e)
             continue;
         }
         for (i = 0; i < XD_NP; i++)
-            *r.p[i] = (int16_t)(i == XD_KIT ? clamp(t->p[i], 0, DRUM_KITS - 1) : i == XD_LVL ? clamp(t->p[i], 0, 127)
+            *r.p[i] = (int16_t)(i == XD_KIT ? drum_kit_ok(t->p[i]) : i == XD_LVL ? clamp(t->p[i], 0, 127)
                                                                                 : clamp(t->p[i], TP[XD_P[i]].min, TP[XD_P[i]].max));
         memcpy(r.dstep, t->dstep, sizeof(dstep_t) * NSTEP);
         for (k = 0; k < NSTEP; k++) {
@@ -893,7 +893,7 @@ UI_SMALL static void autosave_tick(void)                /* main loop */
 {
 #if FELUCCA_FLASH
     uint32_t h, now = fm1_ms;
-    if (!flash_ok || song.playing || transport_req || rec_wait || ft_on || ui.menu ||
+    if (!flash_ok || song.playing || transport_req || rec_wait || ft_on || ui.menu || rsm.st != RS_OFF ||
         now - ui_input_ms < AUTOSAVE_IDLE || now - autosave_ms < AUTOSAVE_GAP || now - autosave_checked < 1000u)
         return;
     autosave_checked = now;
@@ -1409,6 +1409,7 @@ UI_SMALL static void sections_flush(void)                        /* main loop */
         song_dirty = 1;                                 /* (settings_save when quiet, with the song) */
     }
     if ((!sec_dirty && !song_dirty) || song.playing || transport_req || !audio_quiet() || fm1_ms - ui_input_ms < 1500u ||
+        rsm.st != RS_OFF ||                              /* (1.8: no erase in a RESAMPLE take: a gap in it) */
         fm1_ms - tried < 5000u)
         return;
     tried = fm1_ms;                                     /* (a failed write: again in 5 s, not every frame) */

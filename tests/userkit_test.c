@@ -7,7 +7,7 @@
  *   the closed hat chokes the open one, as in the other kits
  *   the sequencer's drum steps play the kit; the built-in kits are as before */
 #include <stdint.h>
-static uint32_t host_slots[4u * 0x14000u / 4u];          /* USR1..4 (a RAM image: the flash has USR4 elsewhere) */
+static uint32_t host_slots[6u * 0x14000u / 4u];          /* USR1..4 (a RAM image: the flash has USR4 elsewhere) */
 #define SMP_USER_XIP(k) ((const uint8_t *)host_slots + (k) * SMP_USER_SIZE)
 #define main hostsim_main
 #include "hostsim.c"
@@ -79,13 +79,20 @@ int main(void)
     song.g[G_DRREV] = 0;                                 /* (no reverb tail between the checks) */
     slot_build(0, notes, lens, 4);
     check(usr_nz[0] == 4u && !usr_nz[1], "USR1 read by smp_user_scan: 4 zones; USR2 empty");
-    check(DRUM_SYN == DRUM_USR + 5u && DRUM_KITS == DRUM_SYN + 4u && !strcmp(DRUM_KIT_NAMES[DRUM_USR], "USR1") && !strcmp(DRUM_KIT_NAMES[DRUM_USR + 3u], "USR4") &&
+    check(DRUM_SYN == DRUM_USR + 5u && DRUM_KITS == DRUM_SYN + 4u + 2u && !strcmp(DRUM_KIT_NAMES[DRUM_USR], "USR1") && !strcmp(DRUM_KIT_NAMES[DRUM_USR + 3u], "USR4") &&
+          !strcmp(DRUM_KIT_NAMES[drum_usr_kit(4u)], "USR5") && !strcmp(DRUM_KIT_NAMES[drum_usr_kit(5u)], "USR6") && drum_usr(drum_usr_kit(5u)) &&
           !strcmp(DRUM_KIT_NAMES[DRUM_PAIR], "USR3+4") && DRUM_PAIR == DRUM_SYN - 1u && !strcmp(DRUM_KIT_NAMES[DRUM_SAMPLED], "808"),
           "KIT: USR1..USR4, USR3+4 after the synthesised kits (the old kit numbers kept)");
     check(SMP_USER_OFF(0u) == 0xA0000u && SMP_USER_OFF(2u) == 0xC8000u && SMP_USER_OFF(3u) == 0xE7000u &&
           FL_STORE_OK(0xE7000u, 0x14000u) && FL_IN(0xE7000u, 0x14000u, FL_USR4_LO, FL_USR4_HI) && !FL_IN(0xE7000u, 0x14001u, FL_USR4_LO, FL_USR4_HI) &&
-          SMP_USER_OFF(3u) >= FL_FM6_HI && SMP_USER_OFF(3u) + SMP_USER_SIZE <= FL_GLOB_LO && !strcmp(SMP_ALL_NAMES[SMP_NSETS + 3u], "USR4"),
+          SMP_USER_OFF(3u) >= FL_FM6_HI && SMP_USER_OFF(3u) + SMP_USER_SIZE <= FL_GLOB_LO && !strcmp(SMP_ALL_NAMES[SMP_USR0 + 3u], "USR4"),
           "USR4: 0xE7000..0xFAFFF, after the FM6 bank, before the settings; the store may write it, not past it (0xFB000: the E..H pool's)");
+    check(SMP_USER_OFF(4u) == 0x71000u && SMP_USER_OFF(5u) == 0x82000u && SMP_USER_OFF(5u) + SMP_USER_SIZE == 0x93000u &&
+          FL_STORE_OK(0x71000u, 0x22000u) && !FL_STORE_OK(0x70000u, 0x1000u) && !FL_STORE_OK(0x71000u, 0x26001u) &&
+          !strcmp(SMP_ALL_NAMES[SMP_USR0 + 4u], "USR5") && !strcmp(SMP_ALL_NAMES[SMP_USR0 + 5u], "USR6") &&
+          !strcmp(SMP_ALL_NAMES[SMP_USR0], "USR1") && smp_src(5) == 0u && smp_src((int16_t)(SMP_USR0 + 5u)) == SMP_USR0 + 5u &&
+          smp_set_step(2, 1) == (int32_t)SMP_USR0 && smp_set_step(7, -1) == 1,
+          "USR5, USR6 (PHREAK 1.4): 0x71000..0x92FFF, where the app area ended; SET 2..7 (the sets gone) play PIANO, the knob skips them");
 
     TDRUM->p[P_E0] = (int16_t)DRUM_USR;                  /* USR1 */
     quiet();
@@ -172,13 +179,13 @@ int main(void)
         for (i = 0; i < NDRUM; i++) syn += drums.v[i].active && drums.synth[i];
         check(syn == 1u, "808 (a synthesised kit) as before");
     }
-    TDRUM->p[P_E0] = 0;                                  /* ACOUSTIC: the GM sample set */
+    TDRUM->p[P_E0] = 0;                                  /* ACOUSTIC, gone with the GM sample set (PHREAK 1.4): the 808 */
     quiet();
     drum_on(38, 110);
     {
-        uint32_t i, gm = 0;
-        for (i = 0; i < NDRUM; i++) gm += drums.v[i].active && !drums.synth[i] && drums.v[i].s[4] < DZ_USR;
-        check(gm == 1u && run_peak(40) > 2000, "ACOUSTIC (the GM sample set) as before");
+        uint32_t i, syn = 0;
+        for (i = 0; i < NDRUM; i++) syn += drums.v[i].active && drums.synth[i];
+        check(syn == 1u && drum_kit() == DRUM_SAMPLED && run_peak(40) > 2000, "kit 0 (ACOUSTIC, gone in PHREAK 1.4) plays the 808");
     }
     {   /* 2.4.1: the click (GLO > GLOBAL > CLICK = ON) is its own voice: heard with a user kit (it has no wood
          * block: in 2.4 it was silent), with the drum track muted, at the level of GLO > DRUMS > LVL */

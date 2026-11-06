@@ -45,6 +45,8 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define FL_FM6_HI       0x000E7000u
 #define FL_USR4_LO      0x000E7000u                /* the user sample slot USR4 (eng_sample.c), 80 KiB; SLOOP 2.4 */
 #define FL_USR4_HI      0x000FB000u                /* (0xFB000..0xFBFFF: the fifth sector of the E..H pool, below) */
+#define FL_USR5_LO      0x00071000u                /* (PHREAK 1.4) the user sample slots USR5, USR6 (eng_sample.c), 68 KiB */
+#define FL_USR5_HI      0x00093000u                /* each, where the app area ended before (it ends at 0x71000 now) */
 #define FL_SECT_LO      0x00093000u                /* the song's sections E..H: four sectors above the app */
 #define FL_SECT_HI      0x00097000u                /* area the update loader writes, and 0xFB000 (storage.c ST_POOL) */
 #define FL_SECT5_LO     0x000FB000u
@@ -56,7 +58,8 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 /* Felucca's own store (projects, user samples; settings; the FM6 bank) */
 #define FL_STORE_OK(off, n) (FL_IN(off, n, FL_DATA_LO, FL_DATA_HI) || FL_IN(off, n, FL_GLOB_LO, FL_GLOB_HI) || \
                              FL_IN(off, n, FL_FM6_LO, FL_FM6_HI) || FL_IN(off, n, FL_USR4_LO, FL_USR4_HI) || \
-                             FL_IN(off, n, FL_SECT_LO, FL_SECT_HI) || FL_IN(off, n, FL_SECT5_LO, FL_SECT5_HI))
+                             FL_IN(off, n, FL_SECT_LO, FL_SECT_HI) || FL_IN(off, n, FL_SECT5_LO, FL_SECT5_HI) || \
+                             FL_IN(off, n, FL_USR5_LO, FL_USR5_HI))
 /* Where the RAM driver may erase / program. The app build allows only its own
  * data regions; the update loader (firmware/loader) defines its own window. */
 #ifndef FL_RANGE_OK
@@ -227,11 +230,11 @@ static RAMFN int fl_read_ram(uint32_t off, uint8_t *dst, uint32_t n)   /* 0x0B f
 static void fl_plain_window_init(void)
 {
     SFCENC_CON &= (uint8_t)~2u;
-    SFCENC_UNENC_L = FL_XIP(0x93000u);            /* 0x0208F000 */
+    SFCENC_UNENC_L = FL_XIP(FL_USR5_LO);          /* 0x0206D000 (PHREAK 1.4: from USR5; 0x93000 before) */
     SFCENC_UNENC_H = 0x07FFFFFFu;
     SFCENC_CON |= 2u;
     __asm__ volatile("cli" ::: "memory");
-    fl_inval(0x93000u, 0x100000u - 0x93000u);     /* drop any decrypted lines */
+    fl_inval(FL_USR5_LO, 0x100000u - FL_USR5_LO); /* drop any decrypted lines */
     __asm__ volatile("csync\n\tsti" ::: "memory");
 }
 

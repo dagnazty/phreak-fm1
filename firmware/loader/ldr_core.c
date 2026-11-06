@@ -9,7 +9,8 @@
  *   2. checks that the package's app area decrypts with THIS chip's key
  *      (taken from isd_config.ini in the device's own flash head), so a
  *      package for another key is refused before anything is erased;
- *   3. writes ONLY the app area [0x4000, 0x93000), sector by sector, skipping
+ *   3. writes ONLY the app area [0x4000, 0x71000) (PHREAK 1.4; 0x93000 before: 0x71000.. holds the user sample
+ *      slots USR5, USR6 now), sector by sector, skipping
  *      sectors that are already equal, and verifies each one; the flash head
  *      (SPL, isd_config) is never written;
  *   4. checks the CRC16 the package stores for flash.bin against everything it
@@ -29,8 +30,10 @@
  *   ldr_progress(done, total)
  * plus the ota.c hooks (frames, time, idle). */
 #define LDR_APP_LO 0x4000u
-#define LDR_APP_HI 0x93000u
-#define LDR_REC_LO 0x93000u                     /* update records live above the app ... */
+#ifndef LDR_APP_HI                               /* overridable: a bigger app (e.g. FM-1 Recon) raises this */
+#define LDR_APP_HI 0x71000u
+#endif
+#define LDR_REC_LO 0x93000u                     /* update records live above the app and USR5, USR6 ... */
 #define LDR_REC_HI 0xFC000u                     /* ... and below Felucca's globals */
 
 static int ldr_fread(uint32_t off, void *p, uint32_t n);

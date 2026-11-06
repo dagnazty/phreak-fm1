@@ -46,6 +46,9 @@ TR = 22050                                   # stored sample rate
 # The other slots are user sets loaded from the web editor.
 CC0_SETS = [("PIANO", "piano"), ("BASS", "oneshot"), ("VIBES", "oneshot"), ("HORNS", "oneshot"),
             ("STRGS", "oneshot"), ("FLUTE", "sus"), ("SCRCH", "oneshot"), ("KIT", "kit")]
+# (PHREAK 1.4) only PIANO and BASS are built in: the flash the others took (VIBES .. SCRCH and the GM kit PERC,
+# 175 KB) holds the user sample slots USR5 and USR6 (eng_sample.c). Set numbers: PIANO 0, BASS 1 as before
+BUILT_IN = ("PIANO", "BASS")
 MEASURED_TUNING = ()                         # sets recorded off A440 (measured near the named note)
 
 # the preset of each set: name, {SET (filled in), TUNE, BITS, LOOP (filled in), CUT, -, DRV, -}, env, mono,
@@ -60,6 +63,11 @@ SET_PRESETS = {
     "SCRCH": ("SCRATCH", [0, 0, 0, 0, 127, 0, 8, 0], (0, 127, 127, 18), 0, (0, 0, 0, 0), ()),
     "PERC": ("GM KIT", [0, 0, 0, 0, 127, 0, 0, 0], (0, 127, 127, 60), 0, (0, 0, 0, 6), ()),
 }
+# (PHREAK 1.9) the user slots as sounds of their own in PRESETS (ui.c BANK, kind USR): SAMPLE with SET USR1..USR6
+# (eng_sample.c SMP_USR0 = 8), a plain one-shot-ish keyboard sound, the sample at its own level
+USER_SLOTS, USER_SET0 = 6, 8
+def USER_PRESET(k):
+    return (f"USR{k + 1}", [0, 0, 0, 0, 127, 0, 0, 0], (0, 127, 127, 40), 0, (0, 0, 6, 12), ())
 # more presets on a set: (set, name, E[], env, mono, sends, more)
 EXTRA_PRESETS = [
     ("PIANO", "DUSTY PNO", [0, 0, 34, 0, 96, 0, 24, 0], (0, 98, 0, 52), 0, (0, 8, 10, 22), ()),
@@ -410,9 +418,14 @@ class Builder:
             i = next((j for j, (n, _, _) in enumerate(named) if n == setname), None)
             if i is not None:
                 L.append(preset(i, self.kinds.get(setname, "wave"), *rest))
+        for k in range(USER_SLOTS):                # (PHREAK 1.9) a sound per user slot: SET USR1..USR6 (8..13)
+            L.append(preset(USER_SET0 + k, "wave", *USER_PRESET(k)))
         L.append("};")
         names = ", ".join(f'"{n}"' for n, _, _ in named)
         L.append("#define SMP_SET_NAMES_INIT " + names)
+        pad = [n for n, _, _ in named][:8]                     # (PHREAK 1.4) the SET numbers up to USR1 (8):
+        pad += [pad[0]] * (8 - len(pad))                       # the ones no set has play set 0 (eng_sample.c smp_src)
+        L.append("#define SMP_SET_NAMES_8 " + ", ".join(f'"{n}"' for n in pad))
         L.append("static const char *const SMP_SET_NAMES[] = {" + names + "};")
         L += self.break_header()
         return "\n".join(L) + "\n"
@@ -471,9 +484,8 @@ def main(out):
     b = Builder()
     if have_cc0:
         for name, kind in CC0_SETS:
-            if kind != "kit":                       # the CC0 KIT feeds the GM kit
+            if kind != "kit" and name in BUILT_IN:  # (the CC0 KIT fed the GM kit, gone in PHREAK 1.4)
                 b.cc0_set(name, kind)
-    b.gm_kit(have_cc0)
     if os.environ.get("FELUCCA_SLICE") == "1":       # SLICE's BREAK: only when that engine is built
         b.slice_break()                             # last: the sets' offsets stay as they were
     text = b.header()

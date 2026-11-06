@@ -140,7 +140,7 @@ static void xd_tick(void)
             else if ((int32_t)(abs - nabs) > 0)
                 fire = 1;
         }
-        kit = (uint32_t)clamp(x->p[XD_KIT], 0, DRUM_KITS - 1);
+        kit = (uint32_t)drum_kit_ok(x->p[XD_KIT]);
         quiet = x->p[XD_MUTE] || (song.solo && !((song.solo >> TRK_DRUM) & 1u));
         if (fire) {
             uint32_t c;

@@ -23,9 +23,17 @@
  * and USR3+4: one kit over the slots USR3 and USR4 (a lane's sound in either) */
 #define DRUM_SAMPLED 5u
 #define DRUM_USR (DRUM_SAMPLED + DS_NKITS)
-#define DRUM_PAIR (DRUM_USR + SMP_USER_SLOTS)   /* USR3+4: one kit in two slots (the editor splits it), ~15 s */
+#define DRUM_PAIR (DRUM_USR + 4u)               /* USR3+4: one kit in two slots (the editor splits it), ~15 s */
 #define DRUM_SYN (DRUM_PAIR + 1u)                /* SLOOP 2.5: SYN1..SYN4, your synthesised kits (drum_synth.c dsu) */
-#define DRUM_KITS (DRUM_SYN + DSU_N)
+#define DRUM_USR5 (DRUM_SYN + DSU_N)             /* PHREAK 1.4: USR5, USR6 (the new slots) after SYN4: the numbers
+                                                  * before keep their kits */
+#define DRUM_KITS (DRUM_USR5 + 2u)
+/* PHREAK 1.4: the GM sample kit (the built-in set PERC) is gone and with it the kits 0..4 (ACOUSTIC .. DUST): a
+ * drum track's kit is DRUM_KIT_MIN (808) or above, an old project's 0..4 plays the 808 */
+#define DRUM_KIT_MIN DRUM_SAMPLED
+static int32_t drum_kit_ok(int32_t v) { return clamp(v, DRUM_KIT_MIN, DRUM_KITS - 1); }
+/* the kit of user slot k (USR1..USR6) */
+static int16_t drum_usr_kit(uint32_t k) { return (int16_t)(k < 4u ? DRUM_USR + k : DRUM_USR5 + (k - 4u)); }
 
 /* the extra drum tracks D2, D3 (after SLOOP 2.8.4). The one shown (drum_focus: 0 D1, 1 D2, 2 D3) lives on the drum
  * track, trk[TRK_DRUM]: every screen, the keys, REC, MIDI and the sequencer see it as ever (ALGORITHM picks it,
@@ -90,7 +98,7 @@ static void drum_snd_defaults(int16_t *p)
         p[Z[i]] = 0;
     p[P_DEC] = 70, p[P_SUS] = 127, p[P_REL] = 127, p[P_LRATE] = 60, p[DS_CUT] = 127, p[DS_MARK] = 1;
 }
-static int drum_usr(uint32_t kit) { return kit >= DRUM_USR && kit < DRUM_SYN; }
+static int drum_usr(uint32_t kit) { return (kit >= DRUM_USR && kit < DRUM_SYN) || (kit >= DRUM_USR5 && kit < DRUM_KITS); }
 typedef struct {
     int16_t p[XD_NP];
     int16_t q[XQ_N];                    /* (PHREAK 1.1) its USR kit sound (XQ_P) */
@@ -118,14 +126,16 @@ static int32_t drum_level_of(uint32_t d) { return d ? *xd_par(d, XD_LVL) : song.
 static int16_t *drum_lvl_ptr(void) { return drum_focus ? &trk[TRK_DRUM].p[P_LEVEL] : &song.g[G_DRLVL]; }
 static void xd_tick(void);              /* (xdrums.c) */
 static void xd_reset(void);
-static const char *const DRUM_KIT_NAMES[] = {"ACOUSTIC", "DEEP", "TIGHT", "BRIGHT", "DUST", DS_KIT_NAME_LIST,
+/* (PHREAK 1.4) 0..4, the GM sample kits, are gone: they play the 808 and say so (the web editor hides the repeats) */
+static const char *const DRUM_KIT_NAMES[] = {"808", "808", "808", "808", "808", DS_KIT_NAME_LIST,
                                              "USR1", "USR2", "USR3", "USR4", "USR3+4",
-                                             "SYN1", "SYN2", "SYN3", "SYN4"};
-static const char *const DRUM_KIT_STYLES[] = {"STUDIO", "SOFT", "PUNCHY", "BRIGHT", "DUSTY", DS_KIT_STYLE_LIST,
+                                             "SYN1", "SYN2", "SYN3", "SYN4", "USR5", "USR6"};
+static const char *const DRUM_KIT_STYLES[] = {"HIP HOP", "HIP HOP", "HIP HOP", "HIP HOP", "HIP HOP", DS_KIT_STYLE_LIST,
                                               "YOUR KIT", "YOUR KIT", "YOUR KIT", "YOUR KIT", "BIG KIT",
-                                              "YOUR SYNTH", "YOUR SYNTH", "YOUR SYNTH", "YOUR SYNTH"};
+                                              "YOUR SYNTH", "YOUR SYNTH", "YOUR SYNTH", "YOUR SYNTH", "YOUR KIT",
+                                              "YOUR KIT"};
 _Static_assert(sizeof(DRUM_KIT_NAMES) / sizeof(DRUM_KIT_NAMES[0]) == DRUM_KITS, "a name per kit");
-static uint32_t drum_kit(void) { return (uint32_t)clamp(TDRUM->p[P_E0], 0, DRUM_KITS - 1); }
+static uint32_t drum_kit(void) { return (uint32_t)drum_kit_ok(TDRUM->p[P_E0]); }
 #define DRUM_DEFAULT_KIT DRUM_SAMPLED   /* power-on: 808 */
 
 static struct {
@@ -394,14 +404,14 @@ static void drum_on_k(uint32_t note, uint32_t vel, uint32_t kit, uint32_t src)
     voice_t *v = &drums.v[0];
     uint32_t i, zi = 0xFFFFu;
     int32_t zid = -1;
-    kit = kit < DRUM_KITS ? kit : 0u;
+    kit = (uint32_t)drum_kit_ok((int32_t)kit);       /* (PHREAK 1.4: the kits 0..4 are gone: 808) */
     drum_src = (uint8_t)(src % 3u);
     if (note != 76u && note != 77u && src == drum_focus)   /* the pads and key LEDs (not the click's wood block): the
                                                          * drum track shown */
         drums.hits |= (uint16_t)(1u << lane_of_note(note));
     if (note == 35u || note == 36u)
         drums.kick = 1;                             /* (DUCK) */
-    if (kit >= DRUM_SYN) {                          /* SYN1..SYN4: your synthesised kit */
+    if (kit >= DRUM_SYN && kit < DRUM_USR5) {       /* SYN1..SYN4: your synthesised kit */
         const dsu_kit_t *u = dsu_kit(kit - DRUM_SYN);
         drum_synth_on(note, vel, kit, u->s, u->crush, 1);
         return;
@@ -410,7 +420,9 @@ static void drum_on_k(uint32_t note, uint32_t vel, uint32_t kit, uint32_t src)
         if (note == 76u || note == 77u)
             return;                                 /* (the click's wood block: not a lane) */
         note = LANE_NOTE[lane_of_note(note)];
-        if (kit == DRUM_PAIR) {                     /* USR3+4: the lane's sound in USR3, else in USR4 */
+        if (kit >= DRUM_USR5) {                     /* (PHREAK 1.4) USR5, USR6 */
+            zid = drum_usr_zone(4u + (kit - DRUM_USR5), note);
+        } else if (kit == DRUM_PAIR) {              /* USR3+4: the lane's sound in USR3, else in USR4 */
             zid = drum_usr_zone(2, note);
             if (zid < 0)
                 zid = drum_usr_zone(3, note);

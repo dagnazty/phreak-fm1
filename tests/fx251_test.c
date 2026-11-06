@@ -10,7 +10,7 @@
  *            learning a CC is handed to the UI; the CCs with a meaning of their own are never learned
  * Exit status: the number of failed checks. */
 #include <stdint.h>
-static uint32_t host_slots[4u * 0x14000u / 4u];          /* the user sample slots (a RAM image of the flash) */
+static uint32_t host_slots[6u * 0x14000u / 4u];          /* the user sample slots (a RAM image of the flash) */
 #define SMP_USER_XIP(k) ((const uint8_t *)host_slots + (k) * SMP_USER_SIZE)
 #define main hostsim_main
 #include "hostsim.c"

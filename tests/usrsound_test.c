@@ -8,7 +8,7 @@
  *   the pages open with a USR kit only; a project keeps D1's sound, one saved before gets it as new;
  *   a section's record keeps D2's and D3's, PHREAK 1.0's record (XDR1) gives them as new */
 #include <stdint.h>
-static uint32_t host_slots[4u * 0x14000u / 4u];
+static uint32_t host_slots[6u * 0x14000u / 4u];
 #define SMP_USER_XIP(k) ((const uint8_t *)host_slots + (k) * SMP_USER_SIZE)
 #define FELUCCA_ARRANGER 1
 #define main hostsim_main

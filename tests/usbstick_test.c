@@ -34,7 +34,7 @@ typedef struct {
     int16_t root16, pred;
     uint8_t idx, lo, hi, looped;
 } smp_zone_t;
-#define SMP_USER_SLOTS 4
+#define SMP_USER_SLOTS 6
 #define SMP_USER_SIZE (68u * 1024u)
 #define SMP_USER_OFF(k) ((uint32_t)(k) * SMP_USER_SIZE)
 #define SMP_USER_DATA 512u

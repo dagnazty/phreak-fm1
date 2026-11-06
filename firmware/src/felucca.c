@@ -68,6 +68,7 @@
 #include "ui_vis.c"           /* the full-screen visualiser (HOME on HOME, 2.4) */
 #include "ui_layers.c"       /* hold a function button: what the keys and knobs do (TE style) */
 #include "ui_menu.c"
+#define SE_SAVE_LATER FELUCCA_OTA  /* (smpedit_save.c below, with the flash driver and editor.c) */
 #include "ui_input.c"
 #ifndef FELUCCA_FLASH
 #define FELUCCA_FLASH 1          /* flash driver + storage.c */
@@ -191,6 +192,7 @@ static void ota_commit(const uint8_t *parm)
 #endif
 #if FELUCCA_OTA
 #include "editor.c"          /* web editor SysEx (needs the OTA SysEx plumbing) */
+#include "smpedit_save.c"    /* PHREAK 1.5: the SAMPLE EDITOR's SAVE */
 #endif
 #if FELUCCA_CDC
 #include "console.c"

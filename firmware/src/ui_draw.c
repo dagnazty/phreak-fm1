@@ -472,8 +472,20 @@ UI_SMALL static void graph_browse(void)
             up_slot_label(tag, k);
             up_name(k, nm);
         } else {                                         /* its kind: BASS, KEYS, PAD... */
+            const char *pn = ENGINES[e]->presets[k].name;
             str_cpy(tag, preset_kind(n), sizeof tag);
-            str_cpy(nm, ENGINES[e]->presets[k].name, sizeof nm);
+            str_cpy(nm, pn, sizeof nm);
+            if (ENGINES[e] == &ENG_SAMPLE && pn[0] == 'U' && pn[1] == 'S' && pn[2] == 'R' && pn[3] >= '1' &&
+                pn[3] <= '6' && !pn[4]) {                /* (PHREAK 1.9) a user slot: "USR3  ITS NAME" (or EMPTY) */
+                uint32_t u = (uint32_t)(pn[3] - '1');
+                str_cpy(tag, pn, sizeof tag);
+                if (usr_nz[u]) {
+                    memcpy(nm, ((const smp_user_hdr_t *)smp_user_xip(u))->name, 8);
+                    nm[8] = 0;
+                } else {
+                    str_cpy(nm, "EMPTY", sizeof nm);
+                }
+            }
         }
         if (sel)
             cv_rect(4, y + 6, 3, 3, C_WHITE);
@@ -1048,10 +1060,19 @@ UI_SMALL static void ui_timers(void)
         ui.hot_t--;
 }
 
+static uint8_t se_on, se_shown;                 /* smpedit.c: the SAMPLE EDITOR (PHREAK 1.5) */
+static void se_draw(void);
+static void rs_banner(void);                      /* smpedit.c: RESAMPLE's banner (PHREAK 1.8) */
 static void vis_draw(void);                     /* ui_vis.c */
 static int vis_shown(void);
 static uint8_t vis_on, vis_shown_last, vis_name_t;   /* the visualiser (ui_vis.c): on, drawn last frame, its name's time */
+UI_SMALL static void ui_draw_page(void);
 UI_SMALL static void ui_draw(void)
+{
+    ui_draw_page();
+    rs_banner();                                        /* (PHREAK 1.8) over whatever shows, while a take is on */
+}
+UI_SMALL static void ui_draw_page(void)
 {
     ui.frame++;
     pads_tick();
@@ -1115,6 +1136,17 @@ UI_SMALL static void ui_draw(void)
         ui_timers();
         ui.force = 0;
         return;
+    }
+    if (se_on) {                                        /* (PHREAK 1.5) the SAMPLE EDITOR */
+        se_draw();
+        ui_timers();
+        ui.force = 0;
+        return;
+    }
+    if (se_shown) {                                     /* back from it */
+        se_shown = 0;
+        lcd_fill(0, 0, 240, 240, C_BLACK);
+        ui.force = 1;
     }
     if (vis_shown()) {                                  /* the visualiser over the TRACKS screen */
         vis_draw();

@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* LOAD FROM USB: hold OCT+ alone while switching on. A USB stick (FAT32) on the USB-C port, through an
- * OTG adapter that also powers it; each folder in SAMPLES/ loads into a user sample slot (USR1..USR4), as the web
+ * OTG adapter that also powers it; each folder in SAMPLES/ loads into a user sample slot (USR1..USR6), as the web
  * editor's upload does (eng_sample.c, web/EDITOR_PROTOCOL.md): its WAV files (8/16/24/32-bit PCM, mono or stereo,
  * any rate) mixed to mono, at 22050 Hz, IMA ADPCM, up to 16 files and the slot's 80 KiB (about 7 s).
  * The files sorted by name: one file plays over the whole keyboard; when every name has a note (PAD C3.WAV) they
  * split the keyboard between their notes; else they go to the drum lanes in order (KICK, KICK 2, SNARE, ...: a USR
  * kit), each also on its lane's key. (PHREAK 1.2) A folder also lists its WAV files: OCT+ on one, then a slot, loads
  * that file alone, over the whole keyboard (its note from its name, else C4): a sound for a synth track (SAMPLE,
- * SET USR1..4).
+ * SET USR1..4). PLAY on a file (or on its slot list) previews it through the FM-1's output, streamed from the
+ * stick: any button or knob stops it (us_preview).
  * USB0 is a full-speed host (hal/fm1_usb.h fm1_usb_host_on; the transfers after the AC79 SDK's usb_ctlXfer,
  * usb_h_ep_write and usb0_h_ep_read, USB0 branches), the stick a bulk-only SCSI device, read a sector at a time.
  * Like USB RESCUE: no audio, no TIMER5, no settings. Switch off to leave; the next power-on plays the slots. */
@@ -665,8 +666,111 @@ UI_SMALL static int us_load_one(uint32_t f, uint32_t k)
     return us_load_files(us_lname[f], k);
 }
 
+#ifndef US_TEST_READ
+/* ---- (PHREAK 1.2) PLAY: hear listed file f, streamed from the stick. The I2S DMA runs as at boot (audio.c abuf, its
+ * IRQ masked: nothing renders here), polled: each free half is filled from a FIFO of mono frames at 44.1 kHz in the
+ * pool (nothing uses it on this screen), the FIFO from the file between halves (us_src, linearly resampled, as
+ * us_convert). A first part is read before it sounds; a stick slower than the file starves it (a gap, not a stop).
+ * Any button or knob ends it, as the file's end or US_PV_MAX does. 0 ok, -1 the stick */
+extern uint32_t _pool_start[], _pool_end[];
+#define US_PV_N 65536u                                  /* FIFO frames (128 KiB of the pool, 1.5 s) */
+#define US_PV_PRE 22050u                                /* read before it sounds: 0.5 s */
+#define US_PV_MAX (30u * 44100u)                        /* 30 s at most */
+static uint32_t us_audio_on;
+UI_SMALL static void us_pv_silence(void)
+{
+    uint32_t i;
+    for (i = 0; i < 2u * HALF_WORDS; i++)
+        abuf[i] = 0;
+}
+/* (PHREAK 1.7) the MASTER knob for the preview: its gain, Q12 (0 .. ~4096), the curve of play (main.c
+ * song.master_q12 = k10^2 / 256), the knob smoothed as main.c does; prev < 0: read it fresh */
+static int32_t us_knob;
+UI_SMALL static int32_t us_pv_gain(int32_t prev)
+{
+    int32_t a = fm1_adc_read(FM1_ADC_MASTER), k10;
+    if (a < 0)
+        return prev < 0 ? 2048 : prev;
+    if (prev < 0)
+        us_knob = a * 16;
+    us_knob += (a * 16 - us_knob) / 4;
+    k10 = us_knob / 16;
+    return (k10 * k10) >> 8;
+}
+
+UI_SMALL static int us_preview(uint32_t f)
+{
+    int16_t *q = (int16_t *)(void *)_pool_start;
+    uint32_t w = 0, r = 0, step, acc = 0, made = 0, scan = 0, i, done = 0, quiet = 0;
+    int32_t s0, s1, g;
+    if ((uint32_t)((uint8_t *)_pool_end - (uint8_t *)_pool_start) < US_PV_N * 2u)
+        return us_fail("NO ROOM TO PLAY");
+    if (!us_audio_on) {                                 /* the codec and the DMA, once: silence until a preview */
+        us_pv_silence();
+        fm1_audio_init(abuf, HALF_WORDS, isr_alnk0, 3);
+        fm1_irq_mask(FM1_IRQ_ALNK0);
+        us_audio_on = 1;
+    }
+    us_bad = 0;
+    us_fclu[0] = us_lclu[f], us_fsize[0] = us_lsize[f];
+    if (us_wav(0))
+        return us_bad ? -1 : 0;
+    us_line(10, "PLAYING: ANY KEY STOPS", C_WHITE);
+    us_line(9, "MASTER KNOB: VOLUME", US_DIM);
+    fm1_adc_init();                                     /* (PHREAK 1.7) the MASTER knob: fm1_main has not set it up here */
+    g = us_pv_gain(-1);
+    step = (uint32_t)(((uint64_t)w_rate << 16) / 44100u);
+    s0 = us_src();
+    s1 = us_src();
+    fm1_input_edges(0);
+    for (i = 0; i < FM1_NENC; i++)
+        fm1_enc_take(i);
+    while (!done) {
+        while (w - r < US_PV_N && us_fpos < us_fend && made < US_PV_MAX) {   /* (between halves: one at a time) */
+            q[w++ & (US_PV_N - 1u)] = (int16_t)(s0 + (int32_t)(((int64_t)(s1 - s0) * acc) >> 16));
+            made++;
+            for (acc += step; acc >= 65536u; acc -= 65536u)
+                s0 = s1, s1 = us_src();
+            if ((fm1_audio_pending() & FM1_AUDIO_HALF) && made >= US_PV_PRE)
+                break;
+        }
+        if (us_bad)
+            break;
+        if (made < US_PV_PRE && us_fpos < us_fend)
+            continue;                                   /* (still reading the first part) */
+        if (fm1_audio_pending() & FM1_AUDIO_HALF) {
+            int32_t *o = &abuf[fm1_audio_free_half() * HALF_WORDS], g1 = us_pv_gain(g);
+            uint32_t k;
+            for (k = 0; k < HALF_FRAMES; k++) {          /* MASTER as in play (song.master_q12), glided over the half */
+                int32_t gk = g + (g1 - g) * (int32_t)k / (int32_t)HALF_FRAMES;
+                int32_t v = r != w ? (q[r++ & (US_PV_N - 1u)] * gk) >> 5 : 0;   /* Q15 at -6 dB with MASTER full, 24-bit */
+                o[2u * k] = o[2u * k + 1u] = v;
+            }
+            g = g1;
+            fm1_audio_ack_half();
+            if (r == w && (us_fpos >= us_fend || made >= US_PV_MAX) && ++quiet > 2u)
+                done = 1;                               /* the end, and the halves after it silent */
+        }
+        fm1_wdt_feed();
+        if (++scan >= 64u) {                            /* the panel, every so often (a scan is ~0.6 ms) */
+            scan = 0;
+            fm1_input_scan();
+            for (i = 0; i < FM1_NENC; i++)
+                if (fm1_enc_take(i))
+                    done = 1;
+            if (fm1_input_edges(0))
+                done = 1;
+        }
+    }
+    us_pv_silence();
+    fm1_input_edges(0);
+    us_err = us_bad ? us_err : "";
+    return us_bad ? -1 : 0;
+}
+#endif
+
 /* ---- the screen: KNOB picks, OCT+ opens a folder or loads, OCT- goes back up. A folder with WAVs in it lists
- * LOAD ... USR1..USR4 first, then its folders, then (PHREAK 1.2) its WAV files: OCT+ on one lists LOAD > USR1..4
+ * LOAD ... USR1..USR6 first, then its folders, then (PHREAK 1.2) its WAV files: OCT+ on one lists LOAD > USR1..6
  * for it alone */
 UI_SMALL static int us_open(void)                          /* list the folder us_dep (0 ok) */
 {
@@ -706,7 +810,7 @@ UI_SMALL static void usbstick_main(void)
         us_err = "", sel = top = 0;
         for (draw = 1;;) {
             uint32_t nd = us_pick ? 0u : us_nd, nf = us_pick ? 0u : us_nl, all;
-            nl = us_nw ? 4u : 0u;                          /* the LOAD lines */
+            nl = us_nw ? SMP_USER_SLOTS : 0u;              /* the LOAD lines (USR1..USR6) */
             all = nl + nd + nf;
             if (draw) {
                 draw = 0;
@@ -732,8 +836,9 @@ UI_SMALL static void usbstick_main(void)
                     }
                     us_line(1 + i, l, e == sel ? C_WHITE : US_DIM);
                 }
-                us_line(8, us_pick ? "OCT+ LOAD IT ALONE" : "KNOB PICK, OCT+ OPEN / LOAD", US_DIM);
-                us_line(9, us_dep || us_pick ? "OCT- BACK" : "", US_DIM);
+                us_line(8, us_pick ? "OCT+ LOAD IT, PLAY HEAR IT" : "KNOB PICK, OCT+ OPEN / LOAD", US_DIM);
+                us_line(9, !us_pick && sel >= nl + nd && sel < all ? (us_dep ? "PLAY HEAR IT, OCT- BACK" : "PLAY HEAR IT")
+                                                                   : us_dep || us_pick ? "OCT- BACK" : "", US_DIM);
                 us_line(10, us_err, C_WHITE);
             }
             fm1_wdt_feed();
@@ -747,6 +852,14 @@ UI_SMALL static void usbstick_main(void)
                 top = sel < top ? sel : sel >= top + 7u ? sel - 6u : top;
                 us_err = "", draw = 1;
             }
+#ifndef US_TEST_READ
+            if ((pr & (1u << 12)) && (us_pick || (sel >= nl + nd && sel < all))) {   /* PLAY: hear the file */
+                if (us_preview(us_pick ? us_pick - 1u : sel - nl - nd) && us_bad)
+                    break;
+                draw = 1;
+                continue;
+            }
+#endif
             if (!(pr & 3u))
                 continue;
             draw = 1, us_err = "";
@@ -754,7 +867,7 @@ UI_SMALL static void usbstick_main(void)
                 sel = nl + us_nd + us_pick - 1u, us_pick = 0;
                 top = sel > 6u ? sel - 6u : 0u;
                 continue;
-            } else if ((pr & 2u) && us_pick) {             /* OCT+: the file alone into USR1..4 */
+            } else if ((pr & 2u) && us_pick) {             /* OCT+: the file alone into USR1..6 */
                 if (us_load_one(us_pick - 1u, sel) && us_bad)
                     break;
                 e = us_pick;
@@ -767,7 +880,7 @@ UI_SMALL static void usbstick_main(void)
                 continue;
             } else if ((pr & 1u) && us_dep)                /* OCT-: up */
                 us_dep--, sel = top = 0;
-            else if ((pr & 2u) && sel < nl) {              /* OCT+ on LOAD: the WAVs here into USR1..4 */
+            else if ((pr & 2u) && sel < nl) {              /* OCT+ on LOAD: the WAVs here into USR1..6 */
                 if (us_load(us_pclu[us_dep], us_pname[us_dep], sel) && us_bad)
                     break;                                 /* (the stick pulled out: wait for one again) */
                 us_open();                                 /* (us_load used the lists) */

@@ -523,6 +523,11 @@
   .frow .gain { display: grid; grid-template-columns: 1fr 52px; gap: 6px; align-items: center; }
   .frow .gain .val { color: var(--fg2); text-align: right; }
   .frow select { width: 100%; min-width: 0; }
+  .frow .fnedit { text-align: left; background: none; border: 0; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                  color: var(--fg); cursor: pointer; font: inherit; }
+  .frow .fnedit:hover { color: var(--c); }
+  .fedit .edchk { display: inline-flex; align-items: center; gap: 4px; }
+  .fedit canvas.edwave { height: 72px; }
   .floopbox { display: grid; gap: 2px; }
   .floop { --c: var(--t1); display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; background: var(--bg); padding: 6px 8px 8px 48px;
            border-left: 4px solid var(--c); }
@@ -841,6 +846,12 @@
     .lvpad { height: 64px; }
     .lvfxpads { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
+
+.recmeter { flex: 1; min-width: 200px; height: 14px; background: var(--s2); border-radius: 3px; overflow: hidden; }
+.recmeter > i { display: block; height: 100%; width: calc(var(--v, 0) * 100%); background: var(--t2); transition: width 60ms linear; }
+.recmeter.hot > i { background: var(--red); }
+.recwave { width: 100%; height: 96px; }
+.rectake { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -2026,15 +2037,44 @@ const LOOP = {
   },
 };
 
-/* zones: [{s: Int16Array (22050 Hz), root, lo?, hi?, loop?, ls?, le?}] -> {hdr (480 B), data, zones} (sampleio.user_slot) */
+/* PHREAK 1.9: a zone can be stored at a lower rate (16000, 11025, 8000 Hz) to fit a longer sample in a slot: the FM-1
+   plays any rate (the zone's rate field). Down: a windowed-sinc low-pass under the new Nyquist, then linear steps */
+const SMP_RATES = [22050, 16000, 11025, 8000];
+function lowpass(x, fc) {                           /* fc: cutoff over the sample rate (0..0.5); 63 taps, Blackman */
+  const N = 63, M = (N - 1) / 2, h = new Float64Array(N);
+  let sum = 0;
+  for (let i = 0; i < N; i++) {
+    const k = i - M, w = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)) + 0.08 * Math.cos(4 * Math.PI * i / (N - 1));
+    h[i] = (k ? Math.sin(2 * Math.PI * fc * k) / (Math.PI * k) : 2 * fc) * w;
+    sum += h[i];
+  }
+  const y = new Float64Array(x.length);
+  for (let n = 0; n < x.length; n++) {
+    let a = 0;
+    for (let i = 0; i < N; i++) { const j = n + M - i; if (j >= 0 && j < x.length) a += x[j] * h[i]; }
+    y[n] = a / sum;
+  }
+  return y;
+}
+function atRate(s, r) {                              /* Int16 at SMP.RATE -> Int16 at r */
+  if (!r || r >= SMP.RATE) return s;
+  const y = resample(lowpass(s, 0.45 * r / SMP.RATE), SMP.RATE, r);
+  return Int16Array.from(y, (v) => Math.max(-32768, Math.min(32767, Math.round(v))));
+}
+const fileRate = (f) => f.rate || SMP.RATE;
+const fileBytes = (f) => (Math.floor(f.s.length * fileRate(f) / SMP.RATE) + 1) >> 1;
+
+/* zones: [{s: Int16Array (22050 Hz), root, lo?, hi?, loop?, ls?, le?, rate?}] -> {hdr (480 B), data, zones} (sampleio.user_slot) */
 function buildSlot(name, zonesIn) {
   const zones = [], parts = [];
   let len = 0;
   for (const z of zonesIn) {
-    const [ls, le] = z.loop ? LOOP.range(z) : [0, z.s.length - 1];
-    const e = imaEncode(z.s, ls);                   /* (the decoder's state at the loop start) */
-    zones.push({ off: len, n: z.s.length, ls, le, looped: z.loop ? 2 : 0, root: z.root, lo: z.lo ?? null, hi: z.hi ?? null,
-      pred: e.pred, idx: e.idx });
+    const r = z.rate && z.rate < SMP.RATE ? z.rate : SMP.RATE, s = atRate(z.s, r), q = r / SMP.RATE;
+    let [ls, le] = z.loop ? LOOP.range(z) : [0, z.s.length - 1];
+    if (r !== SMP.RATE) { ls = Math.min(s.length - 1, Math.round(ls * q)); le = z.loop ? Math.max(ls, Math.min(s.length - 1, Math.round(le * q))) : s.length - 1; }
+    const e = imaEncode(s, ls);                     /* (the decoder's state at the loop start) */
+    zones.push({ off: len, n: s.length, ls, le, looped: z.loop ? 2 : 0, root: z.root, lo: z.lo ?? null, hi: z.hi ?? null,
+      pred: e.pred, idx: e.idx, rq: pyRound(r / 44100 * 65536) });
     parts.push(e.data);
     len += e.data.length;
   }
@@ -2058,16 +2098,49 @@ function buildSlot(name, zonesIn) {
   for (let i = 0; i < nm.length; i++) hdr[8 + i] = nm.charCodeAt(i);
   v.setUint32(16, len, true);
   v.setUint32(20, crc32(data), true);
-  const rate = pyRound(SMP.RATE / 44100 * 65536);
   zones.forEach((z, j) => {
     const b = 32 + j * 28;
-    [z.off, z.n, z.ls, z.le, rate].forEach((x, k) => v.setUint32(b + k * 4, x >>> 0, true));
+    [z.off, z.n, z.ls, z.le, z.rq].forEach((x, k) => v.setUint32(b + k * 4, x >>> 0, true));
     v.setInt16(b + 20, z.root * 16, true);
     v.setInt16(b + 22, z.pred, true);
     hdr[b + 24] = z.idx; hdr[b + 25] = z.lo; hdr[b + 26] = z.hi; hdr[b + 27] = z.looped || 0;
   });
   return { hdr, data, zones };
 }
+
+const draftBytes = (d) => d.files.reduce((a, f) => a + fileBytes(f), 0);
+/* (1.9) the longest files a rate lower, one step at a time, until the list fits the slot: 1 if a rate changed */
+function fitRates(d) {
+  let changed = 0;
+  for (let guard = 0; guard < 64 && draftBytes(d) > SMP.MAX_DATA; guard++) {
+    let best = null;
+    for (const f of d.files) if (SMP_RATES.indexOf(fileRate(f)) < SMP_RATES.length - 1 && (!best || fileBytes(f) > fileBytes(best))) best = f;
+    if (!best) break;
+    best.rate = SMP_RATES[SMP_RATES.indexOf(fileRate(best)) + 1];
+    changed = 1;
+  }
+  return changed;
+}
+/* (1.9) a file's edits, made again from its original (nothing changes the original): trim, reverse, pitch (as a tape:
+   up is shorter), normalize, fades. Loop points kept inside */
+const ED_DEF = () => ({ a: 0, b: null, fin: 0, fout: 0, rev: false, norm: true, pitch: 0 });
+function fileRender(f) {
+  if (!f.orig) f.orig = f.s;
+  if (!f.ed) f.ed = ED_DEF();
+  const e = f.ed, o = f.orig, n = o.length;
+  const a = Math.max(0, Math.min(e.a | 0, n - 2)), b = Math.max(a + 2, Math.min(e.b == null ? n : e.b, n));
+  let x = Float64Array.from(o.subarray(a, b));
+  if (e.rev) x.reverse();
+  if (e.pitch) x = Float64Array.from(resample(x, SMP.RATE * Math.pow(2, e.pitch / 12), SMP.RATE));
+  if (e.norm) { let pk = 1e-9; for (const v of x) pk = Math.max(pk, Math.abs(v)); for (let i = 0; i < x.length; i++) x[i] *= 30000 / pk; }
+  const fi = Math.min(x.length, Math.round(e.fin * SMP.RATE / 1000)), fo = Math.min(x.length, Math.round(e.fout * SMP.RATE / 1000));
+  for (let i = 0; i < fi; i++) x[i] *= i / fi;
+  for (let i = 0; i < fo; i++) x[x.length - 1 - i] *= i / fo;
+  f.s = Int16Array.from(x, (v) => Math.max(-32768, Math.min(32767, Math.round(v))));
+  if (f.loop === 2) [f.ls, f.le] = LOOP.range(f);
+}
+/* what the FM-1 will play: at the file's rate (heard here at 22050), its gain */
+const filePreview = (f) => { const r = fileRate(f), d = atRate(f.s, r); return withGain(r < SMP.RATE ? Int16Array.from(resample(d, r, SMP.RATE), Math.round) : f.s, f.gain); };
 
 /* ------------------------------------------------------------------- chop --- */
 /* Chopping a recording into a slot (the CHOP block of the samples tab). All at SMP.RATE, positions
@@ -2422,10 +2495,10 @@ function b64dec(s) {
   return out.subarray(0, o);
 }
 /* object ids (firmware editor.c ED_BK_IDS): 0 the working project, 1 the settings, 2..5 projects A..D (12..15: E..H),
-   6..7 the user preset banks, 32..35 the sample slots USR1..4 (35, USR4: SLOOP 2.4) */
+   6..7 the user preset banks, 32..37 the sample slots USR1..6 (35, USR4: SLOOP 2.4; 36, 37: USR5, USR6, PHREAK 1.4) */
 /* RESTORE: the objects in the order they are written back (banks first; 8 = the FM6 patch bank, firmware v9: a
    file without it restores fine, a v8 device gets no object 8 sent; 9 = the SYN drum kits, firmware v10, likewise) */
-const BK = { FORMAT: "sloop-backup", VERSION: 1, SAMPLES: [32, 33, 34, 35], RESTORE: [6, 7, 8, 9, 10, 11, 2, 3, 4, 5, 12, 13, 14, 15, 0, 1] };   /* 12..15: E..H */   /* 10: MIDI LEARN (2.6),
+const BK = { FORMAT: "sloop-backup", VERSION: 1, SAMPLES: [32, 33, 34, 35, 36, 37], RESTORE: [6, 7, 8, 9, 10, 11, 2, 3, 4, 5, 12, 13, 14, 15, 0, 1] };   /* 12..15: E..H */   /* 10: MIDI LEARN (2.6),
                                                        * 11: your theme (2.7, before the settings: they say whether it is shown) */
 class BackupError extends Error { constructor(code, msg) { super(msg); this.code = code; } }
 /* read everything; progress(done, total bytes) */
@@ -2514,6 +2587,7 @@ async function backupRestore(rq, file, progress = () => {}) {
   for (const id of BK.SAMPLES) {
     if (!m.has(id)) continue;
     const d = m.get(id), k = id - 32;
+    if (typeof dev !== "undefined" && dev && dev.smp && k >= dev.smp.nslots) continue;   /* (USR5, USR6 on a FM-1 with 4 slots: not there) */
     if (!d.length) {
       const e = parse[CMD.SMP_ERASE](await rq(req.smpErase(k), { timeout: 2500, retries: 0 }));
       if (e.rc) throw new BackupError("bkWrite", `erase USR${k + 1} rc ${e.rc}`);
@@ -2936,6 +3010,9 @@ function makeMockDevice(opt = {}) {
   const NONOFF = ["OFF", "ON"], NDIV = ["1/4", "1/8", "1/16", "1/32", "8T", "16T"], NGO = ["--", "GO"], NDASH = ["--"];
   const NSDIV = [...NDIV, "1/2", "1BAR", "2BAR"], NDLY = [...NDIV, "1/8D", "1/16D", "1/4D"];   /* SLOOP 2.4: long steps, dotted delays */
   const D = (label, fmt, min, max, def, names = null, unit = "") => ({ label, fmt, min, max, def, names, unit });
+  /* SAMPLE SET, GRAIN SRC (eng_sample.c SMP_ALL_NAMES): PIANO 0, BASS 1, USR1.. from 8 (PHREAK 1.4: 2..7, the sets
+     gone, play PIANO) */
+  const SMP_SETS = ["PIANO", "BASS", "PIANO", "PIANO", "PIANO", "PIANO", "PIANO", "PIANO", "USR1", "USR2", "USR3", "USR4", "USR5", "USR6"];
   const E = (label, names, def) => D(label, F.ENUM, 0, names.length - 1, def, names);
   const TP = [
     D("LVL", F.DB, 0, 127, 104),
@@ -2985,8 +3062,9 @@ function makeMockDevice(opt = {}) {
     E("CLOCK", ["OFF", "OUT"], 0),                   /* GLO > MIDI 3 (2.7): MIDI clock, START / STOP out on USB */
     D("FADE", F.INT, 0, 15, 0),                      /* GLO > MASTER 2 (2.7.2): the punch-in FX fade (punch.c) */
   ];
-  /* the drum track's P_E0: its kit (drums.c DRUM_KIT_NAMES; 5 = 808, the power-on kit) */
-  const KIT = E("KIT", ["ACOUSTIC", "DEEP", "TIGHT", "BRIGHT", "DUST", "808", "909", "606", "80S", "VINTAGE", "TRAP", "DRILL", "BOOMBAP", "LO-FI", "PHONK", "HOUSE", "D.HOUSE", "TECHNO", "MINIMAL", "ELECTRO", "DISCO", "GARAGE", "JUNGLE", "DUBSTEP", "DEMBOW", "AMAPIANO", "AFRO", "LATIN", "TRIBAL", "SYNTHWV", "CHIP", "ARCADE", "GLITCH", "INDUSTR", "HYPER", "AMBIENT", "JAZZ", "RAGE", "PLUGG", "MEMPHIS", "USR1", "USR2", "USR3", "USR4", "USR3+4", "SYN1", "SYN2", "SYN3", "SYN4"], 0);
+  /* the drum track's P_E0: its kit (drums.c DRUM_KIT_NAMES; 5 = 808, the power-on kit; PHREAK 1.4: 0..4, the GM
+     sample kits, are gone and say 808; USR5, USR6 after SYN4) */
+  const KIT = E("KIT", ["808", "808", "808", "808", "808", "808", "909", "606", "80S", "VINTAGE", "TRAP", "DRILL", "BOOMBAP", "LO-FI", "PHONK", "HOUSE", "D.HOUSE", "TECHNO", "MINIMAL", "ELECTRO", "DISCO", "GARAGE", "JUNGLE", "DUBSTEP", "DEMBOW", "AMAPIANO", "AFRO", "LATIN", "TRIBAL", "SYNTHWV", "CHIP", "ARCADE", "GLITCH", "INDUSTR", "HYPER", "AMBIENT", "JAZZ", "RAGE", "PLUGG", "MEMPHIS", "USR1", "USR2", "USR3", "USR4", "USR3+4", "SYN1", "SYN2", "SYN3", "SYN4", "USR5", "USR6"], 5);
   /* a GM note -> its drum lane (drums.c LANE_OF_GM: 35..81) */
   const LANE_OF_GM = [1, 0, 7, 2, 3, 8, 9, 4, 9, 6, 9, 5, 10, 10, 11, 10, 12, 11, 12, 13, 11, 15, 11, 13, 12, 14, 14, 14, 14, 14,
     14, 14, 15, 15, 13, 13, 15, 15, 13, 13, 7, 7, 7, 14, 14, 15, 15];
@@ -3048,12 +3126,9 @@ function makeMockDevice(opt = {}) {
         D("CRSH", F.PCT, 0, 127, 0), D("SWP", F.PCT, 0, 127, 0), D("VIB", F.PCT, 0, 127, 0), E("ARP", ["OFF", "OCT", "MAJ", "MIN"], 0), D("TONE", F.PCT, 0, 127, 127)],
       presets: [P("GAME LEAD", [0, 0, 32, 0, 0, 20, 0, 127], [0, 60, 90, 30], 1), P("GB BASS", [1, 1, 0, 0, 0, 0, 0, 90], [0, 50, 70, 20], 1),
         P("8BIT ARP", [2, 0, 96, 0, 0, 0, 2, 110], [0, 60, 80, 40], 0)] },
-    { name: "SAMPLE", titles: ["SET", "TONE"], edit: [E("SET", ["PIANO", "BASS", "VIBES", "HORNS", "STRGS", "FLUTE", "SCRCH", "PERC", "USR1", "USR2", "USR3", "USR4"], 0), D("TUNE", F.SEMI, -24, 24, 0), D("BITS", F.INT, 0, 127, 0),
+    { name: "SAMPLE", titles: ["SET", "TONE"], edit: [E("SET", SMP_SETS, 0), D("TUNE", F.SEMI, -24, 24, 0), D("BITS", F.INT, 0, 127, 0),
         E("LOOP", NONOFF, 1), D("CUT", F.INT, 0, 127, 127), NONE, D("DRV", F.PCT, 0, 127, 0), NONE],
       presets: [P("DUSTY PNO", [0, 0, 20, 1, 104, 0, 14, 0], [0, 127, 127, 52], 0), P("UP BASS", [1, 0, 0, 1, 118, 0, 12, 0], [0, 127, 127, 26], 1),
-        P("VIBES", [2, 0, 0, 1, 127, 0, 0, 0], [0, 127, 127, 72], 0), P("HORN STAB", [3, 0, 0, 1, 120, 0, 20, 0], [0, 127, 127, 22], 0),
-        P("STRING STB", [4, 0, 0, 1, 122, 0, 10, 0], [0, 127, 127, 26], 0), P("LOFI FLUTE", [5, 0, 12, 1, 100, 0, 0, 0], [12, 80, 120, 60], 1),
-        P("SCRATCH", [6, 0, 0, 1, 127, 0, 8, 0], [0, 127, 127, 18], 0), P("GM KIT", [7, 0, 0, 0, 127, 0, 0, 0], [0, 127, 127, 60], 0),
         P("LOFI KEYS", [0, 0, 45, 1, 78, 0, 30, 0], [0, 127, 110, 60], 0), P("DEEP BASS", [1, -12, 0, 1, 90, 0, 40, 0], [0, 127, 127, 30], 1)] },
     { name: "VOICE", titles: ["VOWL", "TONE"], edit: [D("VOWL", F.INT, 0, 127, 0), D("VOWL2", F.INT, 0, 127, 64), D("TALK", F.TIME, 0, 127, 0),
         D("SHIFT", F.SEMI, -12, 12, 0), D("BUZZ", F.PCT, 0, 127, 64), D("BRTH", F.PCT, 0, 127, 10), D("Q", F.PCT, 0, 127, 64), D("RAND", F.PCT, 0, 127, 0)],
@@ -3072,12 +3147,11 @@ function makeMockDevice(opt = {}) {
         E("PERC", ["OFF", "2ND", "3RD", "2SOFT", "3SOFT", "2SLOW", "3SLOW"], 0), D("CLICK", F.PCT, 0, 127, 40), D("DRV", F.PCT, 0, 127, 0), E("ROTR", ["OFF", "SLOW", "FAST"], 1)],
       presets: [P("SOUL ORGAN", [3, 0, 0, 0, 0, 25, 10, 1], [0, 64, 127, 40], 0), P("GOSPEL", [6, 0, 0, 0, 1, 60, 40, 2], [0, 64, 127, 45], 0),
         P("JAZZ ORGAN", [4, 0, 0, 0, 2, 50, 8, 1], [0, 64, 127, 40], 0), P("DIRTY B3", [5, 0, 0, 0, 0, 60, 90, 2], [0, 64, 127, 40], 0)] },
-    { name: "GRAIN", titles: ["GRAN", "SPRY"], edit: [E("SRC", ["PIANO", "BASS", "VIBES", "HORNS", "STRGS", "FLUTE", "SCRCH", "PERC", "USR1", "USR2", "USR3", "USR4"], 0),
+    { name: "GRAIN", titles: ["GRAN", "SPRY"], edit: [E("SRC", SMP_SETS, 0),
         D("POS", F.PCT, 0, 127, 32), D("SIZE", F.PCT, 0, 127, 80), D("DENS", F.PCT, 0, 127, 80),
         D("PTCH", F.SEMI, -24, 24, 0), D("SPRD", F.PCT, 0, 127, 30), D("RAND", F.PCT, 0, 127, 10), D("TONE", F.PCT, 0, 127, 127)],
-      presets: [P("LOFI CLOUD", [0, 45, 95, 85, 0, 35, 12, 80], [70, 90, 120, 90], 0), P("VIBE HAZE", [2, 30, 100, 90, 0, 25, 10, 90], [50, 100, 120, 95], 0),
-        P("FLUTE DUST", [5, 50, 108, 72, 0, 10, 10, 85], [50, 100, 127, 100], 0),
-        P("STR CLOUD", [4, 40, 100, 90, 0, 30, 12, 80], [70, 100, 120, 95], 0), P("SHIMMER", [0, 30, 90, 95, 12, 40, 15, 110], [60, 100, 120, 100], 0), P("DRONE", [3, 50, 115, 80, -12, 20, 20, 50], [90, 100, 127, 100], 0)] },
+      presets: [P("LOFI CLOUD", [0, 45, 95, 85, 0, 35, 12, 80], [70, 90, 120, 90], 0),
+        P("SHIMMER", [0, 30, 90, 95, 12, 40, 15, 110], [60, 100, 120, 100], 0), P("DRONE", [1, 50, 115, 80, 0, 20, 20, 50], [90, 100, 127, 100], 0)] },
     /* 9: FM6 (SLOOP 2.4, eng_fm6.c): the macros on top of the patch; ALG and PTCH are F_INT with names on the device */
     { name: "FM6", titles: ["OPS", "PATCH"], edit: [D("ALG", F.INT, 0, 32, 0), D("FB", F.INT, -7, 7, 0), D("MLVL", F.BIPCT, -64, 63, 0),
         D("MRAT", F.INT, -16, 16, 0), D("MEG", F.BIPCT, -64, 63, 0), D("VMOD", F.INT, -7, 7, 0), D("DTUN", F.PCT, 0, 127, 0),
@@ -3167,7 +3241,7 @@ function makeMockDevice(opt = {}) {
     tracks: [0, 1, 2, 3].map(newTrack), sel: 0, rec: 0, solo: 0,
     g: GP.map((d) => d.def),
     slots: new Array(opt.phreak ? 8 : 4).fill(null),   /* the sections (A..H with opt.phreak) */
-    smp: [0, 1, 2, 3].map(() => ({ flash: new Uint8Array(SMP.SLOT_SIZE).fill(0xFF), zones: 0, name: "", len: 0, next: SMP.DATA_OFF })),   /* USR1..4 (2.4: USR4) */
+    smp: [0, 1, 2, 3, 4, 5].map(() => ({ flash: new Uint8Array(SMP.SLOT_SIZE).fill(0xFF), zones: 0, name: "", len: 0, next: SMP.DATA_OFF })),   /* USR1..4 (2.4: USR4) */
     bank: new Array(opt.slots || 32).fill(null),     /* user presets: {engine, name, p, pattern} */
     fm6bank: new Array(FM6_BANK).fill(null),         /* the FM6 patch bank (fm6_bank.c): packed records */
     settings: mockSettings(),                       /* v6: the settings object (2.5: a PER3 with a song order) */
@@ -4725,7 +4799,7 @@ const TEXT = {
     confirmSave: "今のループをセクション {n} にしまいますか？（{n} の中身は置き換わります）", confirmLoad: "セクション {n} を今のループに読み込みますか？ 今の音色とパターンは置き換わります。",
     secSaved: "セクションに保存しました: ", secLoaded: "セクションを読み込みました: ", secEmpty: "空のセクションです: ",
     confirmClear: "シーケンスを全部消しますか？", confirmInit: "音色を初期化しますか？",
-    samples: "サンプル", smpHelp: "WAV をドロップするか選んでください。1 スロットに 16 ファイルまで、モノ 22050 Hz の ADPCM で合計約 7 秒。SAMPLE エンジンの SET（または SLICE エンジンの SRC）で USR1〜USR4 を選ぶと鳴ります。ドラムキットは「ドラムキット」ページで。",
+    samples: "サンプル", smpHelp: "WAV をドロップするか選んでください。1 スロットに 16 ファイルまで、モノ 22050 Hz の ADPCM で合計約 7 秒。SAMPLE エンジンの SET（または SLICE エンジンの SRC）で USR1〜USR6 を選ぶと鳴ります。ドラムキットは「ドラムキット」ページで。",
     zones: "ゾーン", smpName: "名前", chooseFiles: "ファイルを選ぶ", upload: "書き込む", erase: "消去", clearList: "リストを消す",
     file: "ファイル", root: "ルート", keys: "鍵盤", length: "長さ", remove: "外す",
     chopOpen: "音を開く", chopHelp: "録音（WAV、MP3、AIFF…）を開くかドロップし、チョップを決めてスロットへ。1 キーに 1 チョップ。長い録音（7 秒以上）でも、使うチョップを選び長さを調整できます。",
@@ -4795,7 +4869,7 @@ const TEXT = {
     mixer: "ミキサー", mixHelp: "本体の TRACKS ページと同じ 4 トラック。フェーダーはレベル（ドラムは GLO > DRUMS LEVEL）。パンはどのトラックも選択を変えずに書き込みます（0.8 のファームウェアでは一瞬そのトラックを選びます）。REC は本体での録音待機の表示です。",
     level: "レベル", pan: "パン", mute: "ミュート", rec: "REC", selectTrack: "選択", selectedTrack: "選択中",
     projHelp: "FM-1 が持つのは 1 曲です: セクション A〜H（それぞれ 4 トラックのループ: 音色、パターン、テンポ、キー）と、その並び（ソングタブ）。「読込」はセクションを今のループに入れ、「保存」は今のループをセクションにしまいます。4 曲ではありません: 何曲も残すには、曲ごとに下のバックアップをファイルに保存し、使う曲を復元してください。",
-    bkTitle: "バックアップ", bkHelp: "FM-1 の中身をすべて 1 つのファイルに保存します: 今のループ、ソング（セクション A〜H とその並び）、ユーザープリセット、FM6 の音色バンク、サンプル USR1〜4、設定（色、キャリブレーション、ソング、ライト）。復元すると、本体はファイルの状態に戻ります（今の内容は上書きされます）。",
+    bkTitle: "バックアップ", bkHelp: "FM-1 の中身をすべて 1 つのファイルに保存します: 今のループ、ソング（セクション A〜H とその並び）、ユーザープリセット、FM6 の音色バンク、サンプル USR1〜6、設定（色、キャリブレーション、ソング、ライト）。復元すると、本体はファイルの状態に戻ります（今の内容は上書きされます）。",
     bkSave: "バックアップを保存", bkLoad: "ファイルから復元", bkSaving: "バックアップ中 ", bkSaved: "バックアップを保存しました",
     bkRestoring: "復元中 ", bkRestored: "復元しました", bkConfirm: "FM-1 の今の内容をすべてこのバックアップで置き換えます。続けますか？",
     bkBad: "PHREAK のバックアップファイルではないか、壊れています: ", bkStop: "FM-1 の再生を止めてから、もう一度復元してください。",
@@ -4842,12 +4916,24 @@ const TEXT = {
     kitNo4: "このファームウェアには USR4 がありません（SLOOP 2.4 以降）。",
     kitStep3: "FM-1 に送る",
     kitWhereFM1: "FM-1 では: トラック 4（ドラム）→ KIT = {x}。保存したプロジェクトもこのキットを覚えています。",
-    smpIntro: "FM-1 に入れる自分の音。スロットは 4 つ（USR1〜USR4）、各約 7 秒。スロットには楽器（トラック 1〜3 の SAMPLE エンジンで鳴らす）か、ドラムキット（「ドラムキット」ページで作る）が入ります。",
+    smpIntro: "FM-1 に入れる自分の音。スロットは 6 つ（USR1〜USR6）、各約 7 秒。スロットには楽器（トラック 1〜3 の SAMPLE エンジンで鳴らす）か、ドラムキット（「ドラムキット」ページで作る）が入ります。",
     smpStep1: "スロットを選ぶ",
     smpStep2: "音を作る",
     smpStep3: "FM-1 に送って鳴らす",
     smpModeFiles: "ファイルから（1 ファイル = 1 音）",
     smpModeChop: "録音を切り分ける（CHOP）",
+    smpRateFit: "22 kHz では長すぎます: 最も長いサンプルのレートを下げて収めました（編集で変更できます）",
+    smpFit: "スロットに収める", edEditHelp: "編集: トリム、フェード、ピッチ、レート、リバース、ノーマライズ",
+    edRate: "レート", edRateHelp: "スロットに保存するレート: 低いほど長く入り、少しずつこもります", edMax: "最大",
+    edFadeIn: "フェードイン", edFadeOut: "フェードアウト", edPitch: "ピッチ", edReverse: "リバース", edReset: "リセット",
+    edHelp: "元のファイルは変わりません。ここから作り直して、3 で送信します。",
+    smpModeRec: "ライブ録音",
+    smpRecHelp: "マイク、オーディオインターフェース、または FM-1 自体から録音し、トリムしてリストに追加します。\n① ソースを選び、マイクを許可します。FM-1 を選ぶと FM-1 の音を録音します（リサンプリング。メニューの USB AUDIO: FULL で MASTER の前を録音）。② 録音、または「音で開始」で最初の音から開始。③ トリムして試聴し、リストに追加。④ 下の 3 で送信。",
+    recSource: "ソース", recAllow: "マイクを許可", recLevel: "レベル", recOnSound: "音で開始",
+    recRecord: "録音", recStop: "停止", recWaiting: "音を待っています…", recRecording: "録音中", recClip: "クリップ",
+    recRoom: "スロットの残り: 22 kHz で {s} 秒、8 kHz で最大 {m} 秒", recStart: "開始", recEnd: "終了", recNorm: "ノーマライズ", recHear: "試聴",
+    recAdd: "リストに追加", recDrop: "破棄", recAdded: "録音をリストに追加しました", recInput: "入力", recFm1: "FM-1（リサンプル）",
+    recNoAccess: "オーディオ入力にアクセスできません", recNoApi: "このブラウザーでは録音できません（HTTPS か localhost が必要です）。",
     smpFilesHelp: "楽器用: 各ファイルが自分の音程で鳴り、間の鍵盤は近いファイルを音程を変えて鳴らします。\nピアノ、ベース、パッド、声、数個のワンショットに。ファイル名に音名を入れる（PIANO_C4.wav）か、下で設定。1 スロット 16 ファイルまで、合計約 7 秒。",
     smpChopHelp: "1 つの録音（ループ、ブレイク、フレーズ）を切って、1 キーに 1 片。\n① 録音を開くかドロップ ② 切る位置を決める: 再生中に TAP（スペースキー）、ヒット検出、グリッド、等分 ③ 要らない片のチェックを外し、長すぎたら短く ④ 下の 3 で送信。",
     smpDrop: "WAV ファイルをここにドロップ",
@@ -4866,7 +4952,7 @@ const TEXT = {
     smpKitHint: "（ドラムキット USR3+4 に使っているなら、ここに送るとキットの半分が消えます。）",
     smpSendTo: "USR{n} に送る",
     smpPlayOn: "このスロットを鳴らすトラック:",
-    smpWhere: "FM-1 では: シンセトラック、エンジン SAMPLE、SET = USR{n}（EDIT ページの KNOB 1）。上のボタンで自動設定。",
+    smpWhere: "FM-1 では: PRESETS → USR{n}（PHREAK 1.9: 独立したサウンド。最初のサウンドから左に 1 つ）、またはドラムトラックの USR{n} キット。上のボタンでトラックを自動設定。",
     smpNoEngine: "このファームウェアでは自動設定できません: SAMPLE エンジンで SET = USR を選んでください。",
     smpPlaying: "トラック",
     smpFull: "1 スロット 16 ファイルまで",
@@ -5062,7 +5148,7 @@ const TEXT = {
     confirmSave: "Store the loop you are working on into section {n}? (what is in {n} is replaced)", confirmLoad: "Load section {n} into the loop you are working on? The current sounds and patterns are replaced.",
     secSaved: "Saved into section ", secLoaded: "Loaded section ", secEmpty: "Empty section: ",
     confirmClear: "Clear the whole sequence?", confirmInit: "Reset the sound to the engine defaults?",
-    samples: "Samples", smpHelp: "Drop or choose WAV files. Up to 16 files per slot, stored as mono 22050 Hz ADPCM (about 6 s in all). Select USR1–USR4 with SET on the SAMPLE engine (or SRC on the SLICE engine). Drum kits: the Drum kit page.",
+    samples: "Samples", smpHelp: "Drop or choose WAV files. Up to 16 files per slot, stored as mono 22050 Hz ADPCM (about 6 s in all). Select USR1–USR6 with SET on the SAMPLE engine (or SRC on the SLICE engine). Drum kits: the Drum kit page.",
     zones: "zones", smpName: "Name", chooseFiles: "Choose files", upload: "Upload", erase: "Erase", clearList: "Clear list",
     file: "File", root: "Root", keys: "Keys", length: "Length", remove: "Remove",
     chopOpen: "Open a sound", chopHelp: "Open or drop a recording (WAV, MP3, AIFF…), mark the chops, send them to a slot: one chop per key. Any length: a recording longer than a slot (6 s) works, keep the chops you want and adjust them.",
@@ -5132,7 +5218,7 @@ const TEXT = {
     mixer: "Mixer", mixHelp: "The four tracks of the device's TRACKS page. The fader is the level (drums: GLO > DRUMS LEVEL). Pan is written to any track without changing the selection (firmware 0.8: by selecting it for a moment). REC shows a track armed for live recording on the device.",
     level: "Level", pan: "Pan", mute: "Mute", rec: "REC", selectTrack: "Select", selectedTrack: "Selected",
     projHelp: "The FM-1 holds one song: eight sections A–H (four, A–D, on SLOOP), each a loop of the four tracks (sounds, patterns, tempo, key), and the order they play in (the Song tab). Load puts a section into the loop you are working on; Save stores that loop into a section. They are not four songs: to keep several songs, save a Backup file per song (below) and restore the one you want.",
-    bkTitle: "Backup", bkHelp: "Everything on the FM-1 in one file: the loop you are working on, the song (its sections A–H and their order), the user presets, the FM6 patch bank, the samples USR1–USR4 and the settings (colours, calibration, the song, the lights). Restoring puts the FM-1 back as it was in the file (what is on it now is replaced).",
+    bkTitle: "Backup", bkHelp: "Everything on the FM-1 in one file: the loop you are working on, the song (its sections A–H and their order), the user presets, the FM6 patch bank, the samples USR1–USR6 and the settings (colours, calibration, the song, the lights). Restoring puts the FM-1 back as it was in the file (what is on it now is replaced).",
     bkSave: "Save a backup", bkLoad: "Restore from a file", bkSaving: "Backing up ", bkSaved: "Backup saved",
     bkRestoring: "Restoring ", bkRestored: "Restored", bkConfirm: "Replace everything on the FM-1 with this backup?",
     bkBad: "Not a PHREAK backup, or damaged: ", bkStop: "Stop the FM-1 (PLAY), then restore again.",
@@ -5179,12 +5265,24 @@ const TEXT = {
     kitNo4: "This firmware has no USR4 (SLOOP 2.4 and later).",
     kitStep3: "Send it to the FM-1",
     kitWhereFM1: "On the FM-1: track 4 (drums) → KIT = {x}. A project you save remembers the kit.",
-    smpIntro: "Your own sounds on the FM-1. Four slots (USR1–USR4) of about 6 s each. A slot holds an instrument, played by a synth track with the SAMPLE engine, or a drum kit (made on the Drum kit page).",
+    smpIntro: "Your own sounds on the FM-1. Six slots (USR1–USR6) of about 6 s each. A slot holds an instrument, played by a synth track with the SAMPLE engine, or a drum kit (made on the Drum kit page).",
     smpStep1: "Choose a slot",
     smpStep2: "Make the sound",
     smpStep3: "Send it and play it",
     smpModeFiles: "From files (one note per file)",
     smpModeChop: "Chop a recording",
+    smpRateFit: "Too long at 22 kHz: the longest sample set to a lower rate to fit (Edit to change it)",
+    smpFit: "Fit to the slot", edEditHelp: "Edit: trim, fades, pitch, rate, reverse, normalize",
+    edRate: "Rate", edRateHelp: "What the slot stores: a lower rate fits a longer sample, a little darker each step", edMax: "max",
+    edFadeIn: "Fade in", edFadeOut: "Fade out", edPitch: "Pitch", edReverse: "Reverse", edReset: "Reset",
+    edHelp: "Nothing changes in the file itself: these are made again from it, and sent with step 3.",
+    smpModeRec: "Record live",
+    smpRecHelp: "Record from a mic, an audio interface or the FM-1 itself, then trim it and add it to the list.\n① Pick the source and allow the microphone. Pick the FM-1 to record what it plays: that's resampling (its menu's USB AUDIO: FULL records it before MASTER). ② Record, or tick On sound to start on the first sound. ③ Trim, hear it, Add to the list. ④ Send it in step 3 below.",
+    recSource: "Source", recAllow: "Allow microphone", recLevel: "Level", recOnSound: "Start on sound",
+    recRecord: "Record", recStop: "Stop", recWaiting: "waiting for sound…", recRecording: "recording", recClip: "CLIPPING",
+    recRoom: "room in the slot: {s} s at 22 kHz, up to {m} s at 8 kHz", recStart: "Start", recEnd: "End", recNorm: "Normalize", recHear: "Hear",
+    recAdd: "Add to the list", recDrop: "Discard", recAdded: "Recording added to the list", recInput: "Input", recFm1: "the FM-1 (resample)",
+    recNoAccess: "No access to audio input", recNoApi: "This browser can't record audio here (it needs HTTPS or localhost).",
     smpFilesHelp: "For an instrument: each file plays at its own note, and the keys in between play the nearest file, pitched.\nGood for a piano, a bass, a pad, a voice, or a few one-shots. Put the note in the file name (PIANO_C4.wav) or set it below. Up to 16 files, about 6 s in all.",
     smpChopHelp: "Cut one recording (a loop, a break, a phrase) into pieces, one per key.\n① Open or drop it. ② Mark the cuts: TAP while it plays (or the space bar), Find hits, Grid or Equal parts. ③ Untick the pieces you don't want, shorten them if it is too long. ④ Send it in step 3 below.",
     smpDrop: "Drop WAV files here",
@@ -5203,7 +5301,7 @@ const TEXT = {
     smpKitHint: "(If it is half of your USR3+4 drum kit, sending here replaces that half.)",
     smpSendTo: "Send to USR{n}",
     smpPlayOn: "Play this slot on:",
-    smpWhere: "On the FM-1: a synth track, engine SAMPLE, SET = USR{n} (KNOB 1 on the EDIT page). The buttons above set it for you.",
+    smpWhere: "On the FM-1: PRESETS → USR{n}, a sound of its own (PHREAK 1.9: one turn left of the first sound), or a drum track's USR{n} kit. The buttons above set a track for you.",
     smpNoEngine: "This firmware cannot be set from here: choose SAMPLE and SET = USR on the track.",
     smpPlaying: "Track",
     smpFull: "A slot takes 16 files at most",
@@ -6416,10 +6514,14 @@ function paramRow(s, id) {
     input = el("select", { class: wave ? "wave" : null });
     /* the closed select shows a copy of the chosen option (icon span included), not its bare text */
     if (wave) input.append(el("button", {}, el("selectedcontent")));
+    const seen = new Set();
     for (let v = d.min; v <= d.max; v++) {
       const [txt] = fmtValue(d, v);
       const name = d.fmt === F.ENUM && d.names[v - d.min] == null ? String(v) : txt;
-      input.append(el("option", { value: v, ic: wave && WAVE_IC[name] }, name));
+      const o = el("option", { value: v, ic: wave && WAVE_IC[name] }, name);
+      if (d.fmt === F.ENUM && seen.has(name)) o.hidden = true;   /* (PHREAK 1.4: the sets / kits gone repeat a name) */
+      seen.add(name);
+      input.append(o);
     }
     input.addEventListener("change", () => userSet(s, id, +input.value, true));
   } else {
@@ -7695,7 +7797,7 @@ $("clearseq").addEventListener("click", async () => {
 });
 
 /* ---------------------------------------------------------- samples --- */
-const smpDraft = [0, 1, 2, 3].map(() => ({ name: "", files: [] }));   /* USR1..USR4 */
+const smpDraft = [0, 1, 2, 3, 4, 5].map(() => ({ name: "", files: [] }));   /* USR1..USR6 (PHREAK 1.4: USR5, USR6) */
 let smpBusy = false;
 const SMP_RC = { 1: "size", 2: "header", 3: "data CRC", 4: "flash", 5: "zones" };
 const kib = (n) => (n / 1024).toFixed(1);
@@ -7711,7 +7813,6 @@ function splitKeys(files) {
   return out;
 }
 
-const draftBytes = (d) => d.files.reduce((a, f) => a + ((f.s.length + 1) >> 1), 0);
 
 async function decodeFile(f) {
   const buf = await f.arrayBuffer();
@@ -7781,6 +7882,258 @@ function drawLoopWave(cv, f) {
   g.fillStyle = col;
   for (const i of [ls, le + 1]) g.fillRect(Math.min(w - 2, Math.round(i / n * w)), 0, 2, h);
 }
+
+/* ---- PHREAK 1.9: RECORD (the Samples page, step 2): live sampling in the browser. The source: any audio input the
+   computer has (a mic, an audio interface) or the FM-1 itself (a USB audio device: what it plays, before or after
+   MASTER as its menu's USB AUDIO says): that is resampling at any length the slot holds. Mono, trimmed here, then
+   added to the slot's list as a file (22050 Hz, peak-normalised or as recorded) and sent as ever (step 3). */
+const REC = { devs: [], devId: "", stream: null, ctx: null, src: null, node: null, sr: 48000, peak: 0, clip: 0, on: false,
+  arm: false, gate: true, norm: true, chunks: [], n: 0, max: 0, pre: null, x: null, a: 0, b: 0, count: 0, err: "", raf: 0, ui: null };
+const REC_GATE = 0.01;                               /* "on sound": -40 dBFS */
+const recIsFm1 = (d) => /fm-?1|felucca|sloop|phreak|m-?vave/i.test(d.label || "");
+async function recDevices(ask) {
+  try {
+    if (ask) { const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach((x) => x.stop()); }
+    REC.devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
+    if (!REC.devs.some((d) => d.deviceId === REC.devId)) REC.devId = (REC.devs.find(recIsFm1) || REC.devs[0] || {}).deviceId || "";
+    REC.err = "";
+  } catch (e) { REC.err = t("recNoAccess") + " (" + e.message + ")"; }
+}
+function recClose() {
+  if (REC.raf) cancelAnimationFrame(REC.raf);
+  REC.raf = 0;
+  if (REC.node) { try { REC.node.disconnect(); REC.src.disconnect(); } catch (e) { /* gone */ } }
+  if (REC.stream) REC.stream.getTracks().forEach((x) => x.stop());
+  if (REC.ctx) REC.ctx.close().catch(() => {});
+  REC.stream = REC.ctx = REC.src = REC.node = null;
+  REC.on = REC.arm = false;
+}
+async function recOpen() {                          /* the source open and metered (nothing heard: no feedback) */
+  recClose();
+  try {
+    REC.stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: REC.devId ? { exact: REC.devId } : undefined,
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } } });
+  } catch (e) { REC.err = t("recNoAccess") + " (" + e.message + ")"; recRender(); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  REC.ctx = new Ctx();
+  REC.sr = REC.ctx.sampleRate;
+  REC.src = REC.ctx.createMediaStreamSource(REC.stream);
+  REC.node = REC.ctx.createScriptProcessor(4096, 2, 1);
+  REC.node.onaudioprocess = (e) => recBlock(e.inputBuffer);
+  REC.src.connect(REC.node);
+  REC.node.connect(REC.ctx.destination);             /* (its output stays silent: the node only runs when connected) */
+  REC.err = "";
+  if (!REC.devs.length || !REC.devs[0].label) await recDevices(false);   /* (the names, now that access is given) */
+  recRender();
+  const tick = () => { recMeter(); REC.raf = REC.ctx ? requestAnimationFrame(tick) : 0; };
+  REC.raf = requestAnimationFrame(tick);
+}
+function recBlock(ib) {
+  const L = ib.getChannelData(0), R = ib.numberOfChannels > 1 ? ib.getChannelData(1) : L, n = L.length, m = new Float32Array(n);
+  let pk = 0;
+  for (let i = 0; i < n; i++) { m[i] = (L[i] + R[i]) / 2; pk = Math.max(pk, Math.abs(m[i])); }
+  REC.peak = Math.max(pk, REC.peak * 0.85);
+  if (REC.arm) {                                     /* waiting for sound: from a little before it (the last block) */
+    let i = 0;
+    while (i < n && Math.abs(m[i]) < REC_GATE) i++;
+    if (i === n) { REC.pre = m; return; }
+    REC.arm = false, REC.on = true;
+    const keep = Math.round(REC.sr * 0.01);           /* 10 ms before the onset */
+    if (REC.pre && i < keep) { REC.chunks.push(REC.pre.subarray(Math.max(0, REC.pre.length - (keep - i)))); REC.n += keep - i; }
+    const from = Math.max(0, i - keep);
+    REC.chunks.push(m.subarray(from)); REC.n += n - from;
+    recRender();
+  } else if (REC.on) {
+    REC.chunks.push(m); REC.n += n;
+    if (pk >= 0.999) REC.clip = 1;
+  }
+  if (REC.on && REC.n >= REC.max) recStop();
+}
+function recRoom(r = SMP_RATES[SMP_RATES.length - 1]) {   /* seconds the slot's list has left at rate r (1.9: the take is
+                                                     * fitted after, down to 8 kHz) */
+  return Math.max(0, ((SMP.MAX_DATA - draftBytes(smpPage.draft)) * 2 - 64 * (smpPage.draft.files.length + 1)) / r);
+}
+function recStart() {
+  if (!REC.ctx) return;
+  if (REC.ctx.state === "suspended") REC.ctx.resume();
+  REC.chunks = []; REC.n = 0; REC.x = null; REC.clip = 0; REC.pre = null;
+  REC.max = Math.floor(Math.min(recRoom(), 60) * REC.sr);
+  if (REC.max < REC.sr * 0.05) { sayK("smpTooBig"); return; }
+  REC.on = !REC.gate; REC.arm = REC.gate;
+  recRender();
+}
+function recStop() {
+  const was = REC.on || REC.arm;
+  REC.on = REC.arm = false;
+  if (!was) return;
+  if (REC.n) {
+    const x = new Float32Array(REC.n);
+    let o = 0;
+    for (const c of REC.chunks) { x.set(c.subarray(0, Math.min(c.length, REC.n - o)), o); o += c.length; if (o >= REC.n) break; }
+    REC.x = x; REC.a = 0; REC.b = x.length;
+  }
+  REC.chunks = [];
+  recRender();
+}
+function recTake() {                                 /* the trimmed take at 22050 Hz, int16 */
+  const y = resample(REC.x.subarray(REC.a, REC.b), REC.sr, SMP.RATE);
+  return REC.norm ? normalize(y) : Int16Array.from(y, (v) => Math.max(-32768, Math.min(32767, Math.round(v * 32767))));
+}
+function recAdd() {
+  const d = smpPage.draft;
+  if (!REC.x || REC.b - REC.a < 64) return;
+  if (d.files.length >= SMP.MAX_ZONES) { sayK("smpFull"); return; }
+  const dv = REC.devs.find((x) => x.deviceId === REC.devId), fm1 = dv && recIsFm1(dv);
+  d.files.push({ fname: `${fm1 ? "RESAMPLE" : "REC"} ${++REC.count}.wav`, s: recTake(), root: 60 });
+  if (!d.name) d.name = fm1 ? "RESAMPLE" : "REC";
+  if (fitRates(d)) sayK("smpRateFit");
+  REC.x = null;
+  smpPage.mode = "files";
+  sayK("recAdded");
+  renderSamples();
+}
+function recMeter() {
+  const u = REC.ui;
+  if (!u) return;
+  const db = 20 * Math.log10(Math.max(1e-5, REC.peak)), w = Math.max(0, Math.min(1, (db + 60) / 60));
+  u.meter.style.setProperty("--v", w.toFixed(3));
+  u.meter.classList.toggle("hot", REC.peak >= 0.99);
+  if (REC.on) u.state.textContent = `${t("recRecording")} ${(REC.n / REC.sr).toFixed(1)} s / ${(REC.max / REC.sr).toFixed(1)} s` + (REC.clip ? " · " + t("recClip") : "");
+}
+function recWave(cv) {
+  const x = REC.x, w = cv.width = Math.max(300, cv.clientWidth || 600), h = cv.height = 96, g = cv.getContext("2d"), n = x.length;
+  const cs = getComputedStyle(document.documentElement), col = cs.getPropertyValue("--t1").trim(), dim = cs.getPropertyValue("--s3").trim();
+  g.clearRect(0, 0, w, h);
+  for (let px = 0; px < w; px++) {
+    const a = Math.floor(px * n / w), b = Math.floor((px + 1) * n / w);
+    let pk = 0;
+    for (let i = a; i < b; i++) pk = Math.max(pk, Math.abs(x[i]));
+    const y = Math.max(1, Math.round(Math.min(1, pk) * (h / 2 - 2)));
+    g.fillStyle = b > REC.a && a < REC.b ? col : dim;
+    g.fillRect(px, h / 2 - y, 1, y * 2);
+  }
+  g.fillStyle = col;
+  for (const i of [REC.a, REC.b]) g.fillRect(Math.min(w - 2, Math.round(i / n * w)), 0, 2, h);
+}
+function recRender(pane) {
+  const box = pane || (smpPage.ui && smpPage.ui.recPane);
+  if (!box) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    box.replaceChildren(el("p", { class: "warn", text: t("recNoApi") }));
+    return;
+  }
+  if (!REC.ui || REC.ui.lang !== lang || REC.ui.box !== box) {
+    const u = REC.ui = { lang, box };
+    u.dev = el("select", { "aria-label": t("recSource"), onchange: () => { REC.devId = u.dev.value; recOpen(); } });
+    u.allow = el("button", { ic: "symbol_audio", onclick: async () => { await recDevices(true); await recOpen(); } }, t("recAllow"));
+    u.meter = el("div", { class: "recmeter", role: "meter", "aria-label": t("recLevel") }, el("i"));
+    u.gate = el("input", { type: "checkbox", onchange: () => { REC.gate = u.gate.checked; } });
+    u.rec = el("button", { class: "pri", ic: "control_rec_f", onclick: () => { if (REC.on || REC.arm) recStop(); else recStart(); } });
+    u.state = el("span", { class: "dim" });
+    u.wave = el("canvas", { class: "loopwave recwave" });
+    const rng = (idx) => {
+      const r = el("input", { type: "range", min: 0, max: 1, step: 1, value: "0", "aria-label": t(idx ? "recEnd" : "recStart") });
+      r.addEventListener("input", () => {
+        if (idx) REC.b = Math.max(+r.value, REC.a + 64); else REC.a = Math.min(+r.value, REC.b - 64);
+        u.len.textContent = `${((REC.b - REC.a) / REC.sr).toFixed(2)} s`;
+        recWave(u.wave);
+      });
+      return r;
+    };
+    u.ra = rng(0); u.rb = rng(1);
+    u.len = el("span", { class: "val" });
+    u.norm = el("input", { type: "checkbox", onchange: () => { REC.norm = u.norm.checked; } });
+    u.play = el("button", { type: "button", onclick: () => playInt16(recTake()) }, "▶ " + t("recHear"));
+    u.add = el("button", { class: "pri", ic: "symbol_upload", onclick: recAdd }, t("recAdd"));
+    u.drop = el("button", { class: "warn", ic: "symbol_trash", onclick: () => { REC.x = null; recRender(); } }, t("recDrop"));
+    u.err = el("p", { class: "warn" });
+    u.take = el("div", { class: "rectake" }, u.wave,
+      el("div", { class: "bar" }, el("label", { class: "lpt" }, el("span", { class: "dim", text: t("recStart") }), u.ra),
+        el("label", { class: "lpt" }, el("span", { class: "dim", text: t("recEnd") }), u.rb), u.len),
+      el("div", { class: "bar" }, el("label", {}, u.norm, " " + t("recNorm")), u.play, u.add, u.drop));
+    box.replaceChildren(
+      el("div", { class: "bar" }, el("span", { class: "dim", text: t("recSource") }), u.dev, u.allow),
+      el("div", { class: "bar" }, u.meter),
+      el("div", { class: "bar" }, el("label", {}, u.gate, " " + t("recOnSound")), u.rec, u.state),
+      u.err, u.take);
+    if (!REC.ctx) recDevices(false).then(() => { if (REC.devs.length && REC.devs[0].label) recOpen(); else recRender(); });
+  }
+  const u = REC.ui;
+  const opts = REC.devs.map((d, i) => el("option", { value: d.deviceId, text: (d.label || `${t("recInput")} ${i + 1}`) + (recIsFm1(d) ? " — " + t("recFm1") : "") }));
+  if (u.dev.options.length !== opts.length || [...u.dev.options].some((o, i) => o.value !== opts[i].value)) u.dev.replaceChildren(...opts);
+  u.dev.value = REC.devId;
+  u.dev.disabled = !REC.devs.length || REC.on || REC.arm;
+  u.allow.hidden = !!REC.ctx;
+  u.gate.checked = REC.gate;
+  u.norm.checked = REC.norm;
+  setLabel(u.rec, t(REC.on || REC.arm ? "recStop" : "recRecord"));
+  u.rec.disabled = !REC.ctx || smpBusy;
+  u.state.textContent = REC.arm ? t("recWaiting") : REC.on ? t("recRecording") : REC.ctx ? t("recRoom").replace("{s}", recRoom(SMP.RATE).toFixed(1)).replace("{m}", recRoom().toFixed(1)) : "";
+  u.err.textContent = REC.err;
+  u.err.hidden = !REC.err;
+  u.take.hidden = !REC.x;
+  if (REC.x) {
+    for (const r of [u.ra, u.rb]) r.max = String(REC.x.length);
+    u.ra.value = String(REC.a); u.rb.value = String(REC.b);
+    u.len.textContent = `${((REC.b - REC.a) / REC.sr).toFixed(2)} s`;
+    requestAnimationFrame(() => recWave(u.wave));
+  }
+}
+
+/* (1.9) a file's editor on the Samples page, under its row: the original's waveform with what is kept, START / END,
+   FADE IN / OUT, PITCH (semitones, as a tape), RATE (what the slot stores: lower fits longer), REVERSE, NORMALIZE.
+   Dragging redraws; letting go makes the file again (fileRender) */
+function fileEditor(f, i) {
+  if (!f.orig) f.orig = f.s;
+  if (!f.ed) f.ed = ED_DEF();
+  const e = f.ed, n = f.orig.length, ms = (x) => `${(x / SMP.RATE).toFixed(2)} s`;
+  const cv = el("canvas", { class: "loopwave edwave" });
+  const draw = () => {
+    const w = cv.width = Math.max(300, cv.clientWidth || 600), h = cv.height = 72, g = cv.getContext("2d");
+    const cs = getComputedStyle(document.documentElement), col = cs.getPropertyValue(["--t1", "--t2", "--t3", "--t4"][i % 4]).trim(), dim = cs.getPropertyValue("--s3").trim();
+    const a = e.a, b = e.b == null ? n : e.b;
+    g.clearRect(0, 0, w, h);
+    for (let px = 0; px < w; px++) {
+      const p0 = Math.floor(px * n / w), p1 = Math.floor((px + 1) * n / w);
+      let pk = 0;
+      for (let k = p0; k < p1; k++) pk = Math.max(pk, Math.abs(f.orig[k]));
+      const y = Math.max(1, Math.round(pk / 32768 * (h / 2 - 2)));
+      g.fillStyle = p1 > a && p0 < b ? col : dim;
+      g.fillRect(px, h / 2 - y, 1, y * 2);
+    }
+    g.fillStyle = col;
+    for (const p of [a, b]) g.fillRect(Math.min(w - 2, Math.round(p / n * w)), 0, 2, h);
+  };
+  const after = () => { fileRender(f); renderSamples(); };
+  const slider = (key, min, max, step, val, show, set) => {
+    const r = el("input", { type: "range", min, max, step, value: String(val), "aria-label": t(key) });
+    const v = el("span", { class: "val", text: show(val) });
+    r.addEventListener("input", () => { set(+r.value); v.textContent = show(+r.value); draw(); });
+    r.addEventListener("change", after);
+    requestAnimationFrame(() => barFill(r));
+    r.addEventListener("input", () => barFill(r));
+    return el("label", { class: "lpt" }, el("span", { class: "dim", text: t(key) }), r, v);
+  };
+  const box = (key, on, set) => el("label", { class: "edchk" },
+    el("input", { type: "checkbox", checked: on, onchange: (ev) => { set(ev.target.checked); after(); } }), " " + t(key));
+  const rate = el("select", { "aria-label": t("edRate"), title: t("edRateHelp") }, ...SMP_RATES.map((r) =>
+    el("option", { value: String(r), text: `${r === 22050 ? "22" : Math.round(r / 1000)} kHz · ${t("edMax")} ${((SMP.MAX_DATA * 2) / r).toFixed(1)} s` })));
+  rate.value = String(fileRate(f));
+  rate.addEventListener("change", () => { f.rate = +rate.value; renderSamples(); });
+  const hear = el("button", { type: "button", onclick: () => playInt16(filePreview(f)) }, "▶ " + t("recHear"));
+  const reset = el("button", { type: "button", class: "warn", onclick: () => { f.ed = ED_DEF(); f.rate = undefined; after(); } }, t("edReset"));
+  requestAnimationFrame(draw);
+  return el("div", { class: "floop fedit", style: `--c:${TCOL[i % 4]}` }, cv,
+    slider("recStart", 0, n - 2, 1, e.a, ms, (x) => { e.a = Math.min(x, (e.b == null ? n : e.b) - 2); }),
+    slider("recEnd", 2, n, 1, e.b == null ? n : e.b, ms, (x) => { e.b = Math.max(x, e.a + 2); }),
+    slider("edFadeIn", 0, 2000, 10, e.fin, (x) => `${x} ms`, (x) => { e.fin = x; }),
+    slider("edFadeOut", 0, 2000, 10, e.fout, (x) => `${x} ms`, (x) => { e.fout = x; }),
+    slider("edPitch", -12, 12, 1, e.pitch, (x) => `${x > 0 ? "+" : ""}${x} st`, (x) => { e.pitch = x; }),
+    el("label", { class: "lpt" }, el("span", { class: "dim", text: t("edRate") }), rate, el("span")),
+    el("div", { class: "bar" }, box("edReverse", e.rev, (x) => { e.rev = x; }), box("recNorm", e.norm, (x) => { e.norm = x; }), hear, reset),
+    el("span", { class: "dim", text: t("edHelp") }));
+}
+
 async function addSmpFiles(list) {
   const d = smpPage.draft;
   let full = false;
@@ -7793,6 +8146,7 @@ async function addSmpFiles(list) {
     } catch (e) { sayK("smpDecodeFail", `${f.name} (${e.message})`); }
   }
   if (full) sayK("smpFull");
+  if (fitRates(d)) sayK("smpRateFit");
   renderSamples();
 }
 /* the keyboard C1..C7 and which file each key plays (its root: a bright mark) */
@@ -7834,7 +8188,7 @@ function renderSamples() {
     u.erase = el("button", { class: "warn", ic: "symbol_trash", onclick: () => smpErase(P.slot) });
     u.slotNote = el("p", { class: "destnote" });
     /* 2: files or CHOP */
-    u.modes = el("div", { class: "seg modes", role: "tablist" }, ...[["files", "smpModeFiles"], ["chop", "smpModeChop"]].map(([m, k]) =>
+    u.modes = el("div", { class: "seg modes", role: "tablist" }, ...[["files", "smpModeFiles"], ["rec", "smpModeRec"], ["chop", "smpModeChop"]].map(([m, k]) =>
       el("button", { type: "button", role: "tab", "data-m": m, onclick: () => { P.mode = m; renderSamples(); } }, t(k))));
     u.modeHelp = el("div", { class: "modehelp" });
     u.file = el("input", { type: "file", accept: ".wav,audio/wav,audio/x-wav,audio/*", multiple: true, hidden: true });
@@ -7859,9 +8213,11 @@ function renderSamples() {
       sayK("levelsMatched");
       renderSamples();
     } }, t("matchLevels"));
+    u.fit = el("button", { ic: "symbol_waves", onclick: () => { if (fitRates(P.draft)) sayK("smpRateFit"); renderSamples(); } }, t("smpFit"));
     u.filesPane = el("div", { class: "pane" }, u.drop, u.file,
       el("div", { class: "kithead" }, el("div", { class: "bar", style: "margin:0" }, el("span", { class: "dim", text: t("smpKeymap") })), u.meterBox),
-      u.keymap, u.list, el("p", { class: "bar" }, u.match, el("span", { class: "dim", text: t("matchHelp") }), u.clear));
+      u.keymap, u.list, el("p", { class: "bar" }, u.match, el("span", { class: "dim", text: t("matchHelp") }), u.fit, u.clear));
+    u.recPane = el("div", { class: "pane" });         /* (PHREAK 1.9) RECORD: live sampling, built by recRender */
     u.chopPane = el("div", { class: "pane" });
     const chop = $("chop");
     chop.hidden = false;
@@ -7883,7 +8239,7 @@ function renderSamples() {
       el("h2", { ic: "symbol_waves" }, t("samples")),
       el("p", { class: "dim", text: t("smpIntro") }),
       step(1, t("smpStep1"), u.slots, el("div", { class: "bar" }, u.erase), u.slotNote),
-      step(2, t("smpStep2"), u.modes, u.modeHelp, u.filesPane, u.chopPane),
+      step(2, t("smpStep2"), u.modes, u.modeHelp, u.filesPane, u.recPane, u.chopPane),
       step(3, t("smpStep3"), el("div", { class: "bar" }, el("span", { class: "dim", text: t("smpName") }), u.name, u.send, u.prog),
         el("div", { class: "bar" }, el("span", { class: "dim", text: t("smpPlayOn") }), u.play), u.where)));
   }
@@ -7906,8 +8262,10 @@ function renderSamples() {
   /* 2 */
   for (const b of u.modes.children) b.setAttribute("aria-selected", b.dataset.m === P.mode ? "true" : "false");
   u.filesPane.hidden = P.mode !== "files";
+  u.recPane.hidden = P.mode !== "rec";
   u.chopPane.hidden = P.mode !== "chop";
-  u.modeHelp.replaceChildren(...t(P.mode === "files" ? "smpFilesHelp" : "smpChopHelp").split("\n").map((x) => el("p", { text: x })));
+  u.modeHelp.replaceChildren(...t(P.mode === "files" ? "smpFilesHelp" : P.mode === "rec" ? "smpRecHelp" : "smpChopHelp").split("\n").map((x) => el("p", { text: x })));
+  if (P.mode === "rec") recRender(u.recPane); else recClose();
   const d = P.draft, keys = splitKeys(d.files), bytes = draftBytes(d);
   u.meter.value = Math.min(bytes, SMP.MAX_DATA);
   u.meterBox.classList.toggle("over", bytes > SMP.MAX_DATA);
@@ -7915,6 +8273,7 @@ function renderSamples() {
     t("kitUsed").replace("{s}", (d.files.reduce((a, f) => a + f.s.length, 0) / SMP.RATE).toFixed(1)).replace("{t}", (SMP.MAX_DATA * 2 / SMP.RATE).toFixed(1));
   u.keymap.hidden = u.list.hidden = !d.files.length;
   u.match.disabled = d.files.length < 2;
+  u.fit.hidden = bytes <= SMP.MAX_DATA;
   u.list.replaceChildren(...(d.files.length ? [el("div", { class: "frow fhead" }, el("span"), el("span", { text: t("file") }), el("span", { text: t("smpNote") }),
     el("span", { text: t("keys") }), el("span", { text: t("length") }), el("span", { text: t("smpLoop") }), el("span", { text: t("kitGain") }), el("span"))] : []),
     ...d.files.map((f, i) => {
@@ -7928,7 +8287,7 @@ function renderSamples() {
       const gi = el("input", { type: "range", min: LEVEL_MIN, max: 0, step: 1, value: String(f.gain || 0), title: t("smpGainHelp") });
       const gv = el("span", { class: "val", text: `${f.gain || 0} dB` });
       gi.addEventListener("input", () => { f.gain = +gi.value; gv.textContent = `${f.gain} dB`; barFill(gi); });
-      gi.addEventListener("change", () => playInt16(withGain(f.s, f.gain)));
+      gi.addEventListener("change", () => playInt16(filePreview(f)));
       requestAnimationFrame(() => barFill(gi));
       /* 2.7: ONE SHOT, LOOP (the whole file while held), LOOP+TAIL (its points below) */
       const lsel = el("select", { title: t("smpLoopHelp"), "aria-label": t("smpLoop") },
@@ -7940,17 +8299,20 @@ function renderSamples() {
         renderSamples();
       });
       const play = el("button", { type: "button", title: t(f.loop ? "smpHoldPlay" : "kitPlay") }, "▶");
-      if (f.loop) holdToPlay(play, () => { const [a, b] = LOOP.range(f); playLoop(withGain(f.s, f.gain), a, b); });
-      else play.addEventListener("click", () => playInt16(withGain(f.s, f.gain)));
+      if (f.loop) holdToPlay(play, () => { const [a, b] = LOOP.range(f); playLoop(filePreview(f), a, b); });
+      else play.addEventListener("click", () => playInt16(filePreview(f)));
+      const edb = el("button", { type: "button", class: "fn fnedit", title: t("edEditHelp"), "aria-expanded": f.open ? "true" : "false",
+        onclick: () => { f.open = !f.open; renderSamples(); } }, (f.open ? "▾ " : "✎ ") + f.fname);
       const row = el("div", { class: "frow", style: `--c:${TCOL[i % 4]}` },
         play,
-        el("span", { class: "fn", text: f.fname, title: f.fname }), root,
+        edb, root,
         el("span", { text: `${noteName(keys[i][0])}–${noteName(keys[i][1])}` }),
-        el("span", { class: "dim", text: `${(f.s.length / SMP.RATE).toFixed(2)} s` }),
+        el("span", { class: "dim", text: `${(f.s.length / SMP.RATE).toFixed(2)} s` + (fileRate(f) < SMP.RATE ? ` · ${Math.round(fileRate(f) / 1000)}k` : "") }),
         lsel,
         el("div", { class: "gain" }, gi, gv),
         el("button", { type: "button", class: "warn", title: t("remove"), disabled: smpBusy, onclick: () => { d.files.splice(i, 1); renderSamples(); } }, "×"));
-      if (f.loop !== 2) return row;
+      const edBox = f.open ? fileEditor(f, i) : null;
+      if (f.loop !== 2) return edBox ? el("div", { class: "floopbox" }, row, edBox) : row;
       /* LOOP+TAIL: where the loop starts and ends, snapped to a zero crossing when let go */
       const cv = el("canvas", { class: "loopwave" }), n = f.s.length;
       const ms = (x) => `${Math.round(x / SMP.RATE * 1000)} ms`;
@@ -7969,7 +8331,7 @@ function renderSamples() {
         return el("label", { class: "lpt" }, el("span", { class: "dim", text: t(key) }), r, v);
       };
       requestAnimationFrame(() => drawLoopWave(cv, f));
-      return el("div", { class: "floopbox" }, row,
+      return el("div", { class: "floopbox" }, row, ...(edBox ? [edBox] : []),
         el("div", { class: "floop", style: `--c:${TCOL[i % 4]}` }, cv, mk("smpLoopStart", 0), mk("smpLoopEnd", 1),
           el("span", { class: "dim", text: t("smpLoopTail") })));
     }));
@@ -7984,7 +8346,7 @@ function smpButtons() {
   const P = smpPage, k = P.slot, x = dev.smp.slots[k];
   setLabel(u.send, t("smpSendTo").replace("{n}", k + 1));
   let ready;
-  if (P.mode === "files") ready = P.draft.files.length && draftBytes(P.draft) <= SMP.MAX_DATA && P.draft.name;
+  if (P.mode !== "chop") ready = P.draft.files.length && draftBytes(P.draft) <= SMP.MAX_DATA && P.draft.name;
   else { const U = chopUsed(), over = U.use.reduce((a, q) => a + ((q.end - q.start + 1) >> 1), 0) > SMP.MAX_DATA; ready = CH.x && U.use.length && !over && CH.name; }
   u.send.disabled = smpBusy || !ready;
   for (const b of u.play.children) b.disabled = smpBusy || !x.zones || !hasTracks();
@@ -8289,7 +8651,7 @@ async function smpInfo() { dev.smp = parse[CMD.SMP_INFO](await rq(req.smpInfo())
 async function smpUpload(k, prog, ask = true, d = smpDraft[k]) {   /* (d: the DRUM KIT page's own, not the Samples draft) */
   let built, done = false;
   try { built = buildSlot(d.name, d.files.map((f) => ({ s: withGain(f.s, f.gain), root: f.root, lo: f.lo, hi: f.hi,
-    loop: f.loop || 0, ls: f.ls, le: f.le }))); }
+    loop: f.loop || 0, ls: f.ls, le: f.le, rate: f.rate }))); }
   catch (e) { sayK("smpFail", e.message); return false; }
   if (ask && !confirm(t("confirmUpload").replace("{n}", k + 1))) return false;
   const { hdr, data } = built;

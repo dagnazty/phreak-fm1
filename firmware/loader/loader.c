@@ -16,8 +16,11 @@
 #define RING_PUBLISH() __asm__ volatile("" ::: "memory")
 #include "fm1_time.h"
 #include "fm1_sys.h"
-/* the loader may write the app area and erase update records; never the head */
-#define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, 0x93000u) || FL_IN(off, n, 0x93000u, 0xFC000u))
+/* the loader may write the app area and erase update records; never the head, never USR5, USR6 (0x71000..0x92FFF) */
+#ifndef LDR_WR_HI                   /* overridable app-area ceiling (FM-1 Recon raises it to 0x93000) */
+#define LDR_WR_HI 0x71000u
+#endif
+#define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, LDR_WR_HI) || FL_IN(off, n, 0x93000u, 0xFC000u))
 #include "fm1_flash.h"
 #include "../src/libc.c"
 #include "../src/usb.c"

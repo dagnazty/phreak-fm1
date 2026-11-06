@@ -126,9 +126,10 @@ int main(void)
     host_tracks_init();
     song.g[G_DRREV] = 0;
     song.g[G_BPM] = 120;
-    check(DRUM_SYN == DRUM_PAIR + 1u && DRUM_KITS == DRUM_SYN + 4u && !strcmp(DRUM_KIT_NAMES[DRUM_SYN], "SYN1") &&
-          !strcmp(DRUM_KIT_NAMES[DRUM_KITS - 1u], "SYN4") && !strcmp(DRUM_KIT_STYLES[DRUM_SYN], "YOUR SYNTH"),
-          "the kit list ends with SYN1..SYN4, after USR3+4 (older projects keep their kit)");
+    check(DRUM_SYN == DRUM_PAIR + 1u && DRUM_KITS == DRUM_SYN + 4u + 2u && !strcmp(DRUM_KIT_NAMES[DRUM_SYN], "SYN1") &&
+          !strcmp(DRUM_KIT_NAMES[DRUM_SYN + 3u], "SYN4") && !strcmp(DRUM_KIT_STYLES[DRUM_SYN], "YOUR SYNTH") &&
+          !strcmp(DRUM_KIT_NAMES[DRUM_KITS - 1u], "USR6"),
+          "the kit list: SYN1..SYN4 after USR3+4, then (PHREAK 1.4) USR5, USR6 (older projects keep their kit)");
     (void)dsu_kit(0);
     ok = 1;
     for (k = 0; k < DSU_N; k++)
@@ -260,7 +261,7 @@ int main(void)
     }
     {   /* 2.7, the DRUMS screen's SOUND page: a sound's TUNE and DECAY, on a synthesised kit (808), a sampled one
          * (ACOUSTIC) and SYN1; the editor's audition plays SYN1 as designed */
-        static const char *const KN[3] = {"808", "ACOUSTIC", "SYN1"};
+        static const char *const KN[3] = {"808", "909", "SYN1"};   /* (PHREAK 1.4: no sampled kit; 909) */
         for (k = 0; k < 3u; k++) {
             uint32_t kit = 0, kk;
             double z0, zu, zd, t0, ts, tl;

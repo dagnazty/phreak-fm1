@@ -34,7 +34,8 @@ const E = vm.runInNewContext(proto + `
    CHOP, chopNovelty, chopHits, chopSnap, chopGrid, chopEqual, chopList, chopPick, chopFit, chopZones, wavFile, zipStore, crc32,
    UP, bank, capturePatch, auditionPatch, startWatch, libraryFile, readLibraryFile, paramKeys, patternFromSteps, stepsFromPattern, upName,
    mixer, GM_DRUM, drumName, parseNotes, fmtValue, F, DRUM_LANES, LV_NAMES, emptyDrum, lockable, MICRO, FC, fillGet, fillSet, pack7, unpack7,
-   loudDb, matchGains, withGain, LEVEL_MIN, backupCapture, backupRestore, backupObjects, b64enc, b64dec, FM6, KIT, kitPad, kitZones, kitLen, kitBytes, kitFit, kitSplit, kitLaneOf, kitPlace, zipRead, ROLL, SMF, ARR, mockSettings, fm6CartWrite, fm6CartPreset, fm6CartSlots, fm6CartPresets, DSYN, DSYN_MOCK_NAMES, DSYN_MOCK_KITS, SetGate, bkProjFormat, bkDevFormat, bkFwAtLeast, THEME, FM1_PORT_ED: FM1_PORT, fm1Ports, LOOP, LIVE, LVX, SONGF, SECL, secCount, secObj, secOfObj, songCapture, songLoad, songObjects })`,
+   loudDb, matchGains, withGain, LEVEL_MIN, backupCapture, backupRestore, backupObjects, b64enc, b64dec, FM6, KIT, kitPad, kitZones, kitLen, kitBytes, kitFit, kitSplit, kitLaneOf, kitPlace, zipRead, ROLL, SMF, ARR, mockSettings, fm6CartWrite, fm6CartPreset, fm6CartSlots, fm6CartPresets, DSYN, DSYN_MOCK_NAMES, DSYN_MOCK_KITS, SetGate, bkProjFormat, bkDevFormat, bkFwAtLeast, THEME, FM1_PORT_ED: FM1_PORT, fm1Ports, LOOP, LIVE, LVX, SONGF, SECL, secCount, secObj, secOfObj, songCapture, songLoad, songObjects,
+   SMP_RATES, atRate, fileBytes, draftBytes, fitRates, fileRender, ED_DEF, filePreview })`,
 { setTimeout, clearTimeout, setInterval, clearInterval, console, TextEncoder, TextDecoder, Blob, Response, DecompressionStream });
 
 async function editorMock() {
@@ -606,8 +607,8 @@ async function editorBackup() {
   const info = E.parse[C.INFO](await rq(E.req.info()));
   ok(info.proto >= 6, "backup: INFO protocol v6 or later");
   const ec = readFileSync(join(HERE, "../firmware/src/editor.c"), "utf8");
-  ok(/ED_BK_IDS\[\] = \{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 32, 33, 34, 35\}/.test(ec) && E.backupObjects && [10, 11].every((id) => ec.includes(`id == ${id}u`)),
-    "backup: the object ids == editor.c ED_BK_IDS (35: USR4, 9: SYN kits, 10: MIDI LEARN, 11: theme, 12..15: E..H)");
+  ok(/ED_BK_IDS\[\] = \{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 32, 33, 34, 35, 36, 37\}/.test(ec) && E.backupObjects && [10, 11].every((id) => ec.includes(`id == ${id}u`)),
+    "backup: the object ids == editor.c ED_BK_IDS (35: USR4, 36, 37: USR5, USR6, 9: SYN kits, 10: MIDI LEARN, 11: theme, 12..15: E..H)");
   await rq(E.req.upStore(3, "BACKUP ME"));
   await rq(E.req.project(1, 2), { timeout: 4000, retries: 0 });
   const s = Int16Array.from({ length: 3000 }, (_, i) => Math.round(8000 * Math.sin(i / 7)));
@@ -617,8 +618,8 @@ async function editorBackup() {
   await rq(E.req.smpEnd(1, hdr), { timeout: 2000, retries: 0 });
   const A = await E.backupCapture(rq, info);
   const obj = (id) => A.objects.find((o) => o.id === id);
-  ok(A.format === "sloop-backup" && A.objects.map((o) => o.id).join() === "0,1,2,3,4,5,6,7,8,9,32,33,34,35" && obj(9).len === 1464 && obj(33).len > 512 && obj(35).len === 0
-    && obj(4).len > 0 && obj(3).len === 0 && obj(32).len === 0, "backup: LIST + GET: 14 objects (project in C, sample in USR2, B empty, the FM6 bank, the SYN kits, USR4)");
+  ok(A.format === "sloop-backup" && A.objects.map((o) => o.id).join() === "0,1,2,3,4,5,6,7,8,9,32,33,34,35,36,37" && obj(9).len === 1464 && obj(33).len > 512 && obj(35).len === 0 && obj(37).len === 0
+    && obj(4).len > 0 && obj(3).len === 0 && obj(32).len === 0, "backup: LIST + GET: 16 objects (project in C, sample in USR2, B empty, the FM6 bank, the SYN kits, USR4..USR6)");
   await rq(E.req.upErase(3));
   await rq(E.req.smpErase(1), { timeout: 2500, retries: 0 });
   await rq(E.req.set(0, 3, 5));
@@ -1812,6 +1813,42 @@ await editorSetGate();
 await editorMixer();
 await editorTrackParam();
 await editorV5();
+/* PHREAK 1.9: a file at a lower rate (the zone's rate field), fitted to the slot, edited from its original */
+function samplesRates() {
+  const R = E.SMP.RATE, sine = (n, hz, a = 12000) => Int16Array.from({ length: n }, (_, i) => Math.round(a * Math.sin(2 * Math.PI * hz * i / R)));
+  const s = sine(R * 2, 440), slot = E.buildSlot("R", [{ s, root: 60, rate: 11025 }]), v = new DataView(slot.hdr.buffer);
+  ok(v.getUint32(32 + 4, true) === R && v.getUint32(32 + 16, true) === 16384, "1.9: rate 11025: half the samples, the zone's rate 0.25 (Q16)");
+  ok(slot.data.length === R / 2, "1.9: ... half the bytes");
+  const d0 = E.buildSlot("R", [{ s, root: 60 }]);
+  ok(new DataView(d0.hdr.buffer).getUint32(32 + 16, true) === 32768, "1.9: no rate: 22050 as before (0.5)");
+  const lp = E.buildSlot("R", [{ s, root: 60, rate: 16000, loop: 2, ls: 1000, le: 30000 }]), lv = new DataView(lp.hdr.buffer);
+  ok(Math.abs(lv.getUint32(32 + 8, true) - Math.round(E.LOOP.range({ s, loop: 2, ls: 1000, le: 30000 })[0] * 16000 / R)) <= 1, "1.9: loop points scaled to the rate");
+  const hi = E.atRate(sine(R, 7000), 8000);
+  let pk = 0;
+  for (let i = 200; i < hi.length - 200; i++) pk = Math.max(pk, Math.abs(hi[i]));
+  ok(pk < 1500, `1.9: 7 kHz at an 8 kHz rate filtered out, not folded back (peak ${pk})`);
+  const lo = E.atRate(sine(R, 1000), 8000);
+  let pl = 0;
+  for (let i = 200; i < lo.length - 200; i++) pl = Math.max(pl, Math.abs(lo[i]));
+  ok(pl > 11000 && pl < 12600, `1.9: 1 kHz at 8 kHz kept (peak ${pl} of 12000)`);
+  const d = { name: "L", files: [{ s: sine(R * 10, 220), root: 60 }] };
+  ok(E.fitRates(d) && E.draftBytes(d) <= E.SMP.MAX_DATA && d.files[0].rate === 11025, `1.9: 10 s fitted: 11 kHz (${d.files[0].rate})`);
+  const two = { name: "T", files: [{ s: sine(R * 5, 220), root: 60 }, { s: sine(R * 2, 220), root: 72 }] };
+  E.fitRates(two);
+  ok(E.draftBytes(two) <= E.SMP.MAX_DATA && two.files[0].rate < R && !two.files[1].rate, "1.9: two files: the longer one lowered first");
+  const f = { s: sine(R, 220), root: 60 };
+  E.fileRender(f);
+  f.ed.a = 1000; f.ed.b = 12025; E.fileRender(f);
+  ok(f.s.length === 11025 && f.orig.length === R, "1.9: trim: the kept part, the original kept");
+  f.ed.pitch = 12; E.fileRender(f);
+  ok(Math.abs(f.s.length - 5512) <= 2, `1.9: pitch +12: half as long (${f.s.length})`);
+  f.ed.pitch = 0; f.ed.fin = 100; f.ed.fout = 100; E.fileRender(f);
+  ok(Math.abs(f.s[0]) < 50 && Math.abs(f.s[f.s.length - 1]) < 50 && Math.abs(f.s[5000]) > 1000, "1.9: fades: silent at both ends");
+  const fw = { s: Int16Array.from({ length: 1000 }, (_, i) => i * 20), root: 60 };
+  E.fileRender(fw); fw.ed.rev = true; fw.ed.norm = false; E.fileRender(fw);
+  ok(fw.s[0] === 19980 && fw.s[999] === 0, "1.9: reverse");
+}
+
 await editorV7();
 await editorV8();
 await editorV9();
@@ -1828,6 +1865,7 @@ editorTabs();
 editorIcons();
 samplesMatch();
 chopTests();
+samplesRates();
 await packages();
 await updater();
 console.log(failed ? `WEB TESTS FAILED (${failed})` : "web tests passed");

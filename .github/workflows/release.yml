@@ -1,0 +1,148 @@
+# Build a PHREAK release: the firmware package (build/phreak-X.Y.fwsc, identity FM-1_9XY) and the web site (the
+# installer and the editor), checked, then published as a GitHub release.
+#
+#   Push a tag:     git tag v1.9 && git push sloop v1.9        -> release "PHREAK 1.9"
+#   Or by hand:     Actions -> Release -> Run workflow, version 1.9 (a draft release unless "publish" is ticked)
+#
+# On Linux x86_64 the JieLi toolchain runs natively (no Docker). The toolchain comes from JieLi (tools/get_toolchain.sh);
+# the three SDK files the package needs come from the AC79 SDK on Gitee at the tested commit, checked against
+# tools/build.py's SDK_SHA256.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "PHREAK version (X.Y, e.g. 1.9)"
+        required: true
+      publish:
+        description: "Publish the release (unticked: a draft)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  AC79_SDK_COMMIT: d179b4484759423312073f5fbb232501aa491047   # AC79NN_SDK_V1.2.1_2023-12-13
+  AC79_SDK_RAW: https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK/raw
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then V="${{ inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          echo "$V" | grep -Eq '^[0-9]\.[0-9]$' || { echo "version must be X.Y (one digit each: the identity is FM-1_9XY), got '$V'"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "ident=FM-1_9$(echo "$V" | tr -d .)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Python packages
+        run: pip install Pillow
+
+      - name: JieLi toolchain (cached)
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/.jieli
+          key: jieli-toolchain-${{ hashFiles('tools/get_toolchain.sh') }}
+
+      - name: Download the toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: sh tools/get_toolchain.sh "$HOME/.jieli"
+
+      - name: AC79 SDK files
+        run: |
+          SDK="$RUNNER_TEMP/ac79sdk"
+          for f in uboot.boot cfg_tool.bin cfg/eq_cfg_hw.bin; do
+            mkdir -p "$SDK/cpu/wl82/tools/$(dirname "$f")"
+            curl -fsSL --retry 3 -o "$SDK/cpu/wl82/tools/$f" "$AC79_SDK_RAW/$AC79_SDK_COMMIT/cpu/wl82/tools/$f"
+          done
+          python3 - "$SDK/cpu/wl82/tools" <<'EOF'
+          import hashlib, re, sys, pathlib
+          want = dict(re.findall(r'"([^"]+)": "([0-9a-f]{64})"', pathlib.Path("tools/build.py").read_text().split("SDK_SHA256 = {")[1].split("}")[0]))
+          for rel, sha in want.items():
+              got = hashlib.sha256((pathlib.Path(sys.argv[1]) / rel).read_bytes()).hexdigest()
+              if got != sha:
+                  sys.exit(f"SDK file {rel}: sha256 {got}, expected {sha}")
+              print(f"ok  {rel}")
+          EOF
+          echo "AC79_SDK=$SDK" >> "$GITHUB_ENV"
+
+      - name: Build the firmware
+        run: |
+          export JIELI_TOOLCHAIN="$HOME/.jieli/toolchain"
+          sh build.sh --release "${{ steps.v.outputs.version }}"
+          test -f "build/phreak-${{ steps.v.outputs.version }}.fwsc"
+
+      - name: Check the package
+        run: |
+          python3 - "build/phreak-${{ steps.v.outputs.version }}.fwsc" "${{ steps.v.outputs.ident }}" <<'EOF'
+          import sys
+          sys.path.insert(0, "tools")
+          import fm1_install
+          got, image = fm1_install.load_package(sys.argv[1], False)   # (the installer's checks: loader, header, CRCs)
+          if got != sys.argv[2]:
+              sys.exit(f"{sys.argv[1]}: identity {got}, expected {sys.argv[2]}")
+          raw = open(sys.argv[1], "rb").read()
+          print(f"ok  {sys.argv[1]}: {len(raw)} B, {got}")
+          EOF
+
+      - name: Web tests
+        run: node web/test_web.mjs
+
+      - name: Build the site
+        run: |
+          python3 web/make_site.py "build/phreak-${{ steps.v.outputs.version }}.fwsc" "${{ steps.v.outputs.version }}" build/site
+          (cd build/site && zip -qr "../phreak-${{ steps.v.outputs.version }}-site.zip" .)
+
+      - name: Release notes
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          ROW="$(grep -F "| **$V** |" README.md | head -1 | awk -F'|' '{print $4}' | sed 's/^ *//;s/ *$//')"
+          {
+            echo "## PHREAK $V (${{ steps.v.outputs.ident }})"
+            echo
+            [ -n "$ROW" ] && echo "$ROW" && echo
+            echo "### Install"
+            echo
+            echo '```'
+            echo "python3 tools/fm1_install.py phreak-$V.fwsc"
+            echo '```'
+            echo
+            echo "Or open the web installer from \`phreak-$V-site.zip\` (serve it over HTTPS or localhost, in Chrome or Edge)."
+            echo "Your projects, presets, samples and settings are kept. See the README for going back to SLOOP or the official firmware."
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phreak-${{ steps.v.outputs.version }}
+          path: |
+            build/phreak-${{ steps.v.outputs.version }}.fwsc
+            build/phreak-${{ steps.v.outputs.version }}-site.zip
+
+      - name: GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: PHREAK ${{ steps.v.outputs.version }}
+          body_path: ${{ runner.temp }}/notes.md
+          draft: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
+          files: |
+            build/phreak-${{ steps.v.outputs.version }}.fwsc
+            build/phreak-${{ steps.v.outputs.version }}-site.zip

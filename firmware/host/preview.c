@@ -11,8 +11,8 @@
 #undef memcpy
 #undef memcmp
 #include "felucca_tables.h"
-static uint8_t user_flash[4][0x14000];
-#define SMP_USER_XIP(k) (user_flash[(k) & 3u])
+static uint8_t user_flash[6][0x14000];                 /* USR1..USR6 (PHREAK 1.4: 6) */
+#define SMP_USER_XIP(k) (user_flash[(uint32_t)(k) % 6u])
 static struct { volatile uint32_t notes, buttons; } fm1_in;
 static void fm1_irq_off(void) {}
 static void fm1_irq_on(void) {}

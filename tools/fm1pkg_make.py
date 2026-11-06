@@ -21,8 +21,11 @@ import os
 import struct
 from pathlib import Path
 
-APP_SLOT = 0x8DFBC
-FLASH_SIZE = 0x93000
+# PHREAK 1.4: the app area ends at 0x71000 (0x93000 before; app.bin 0x8DFBC): 0x71000..0x92FFF holds the user sample
+# slots USR5, USR6 (firmware/src/eng_sample.c), which the update loader no longer writes (firmware/loader/ldr_core.c
+# LDR_APP_HI). app.bin's slot + cfg_tool.bin + the cfg directory end below it (firmware/app.ld: XIP LENGTH = APP_SLOT)
+APP_SLOT = 0x6C800
+FLASH_SIZE = 0x71000
 KEY = 0x980F
 # flash header: JieLi SDK defaults (burner_size 544, VID "0.01", flash_size 0xFF000,
 # fs_ver 0x10, PID "AC791N_STORY"), plain, without its CRC

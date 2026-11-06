@@ -76,6 +76,10 @@ $CC -O2 -w -Ibuild/gen -Ifirmware/src -Ifirmware/hal -o "$OUT/userkit_test" test
 run "user drum kits (KIT USR1..USR3): a user slot's sounds on the drum lanes" "$OUT/userkit_test"
 $CC -O2 -w -Ibuild/gen -Ifirmware/src -Ifirmware/hal -o "$OUT/usrsound_test" tests/usrsound_test.c -lm
 run "PHREAK 1.1: a USR kit's ENV, LFO, filter, TUNE, BITS, LOOP on its drum track, kept with projects and sections" "$OUT/usrsound_test"
+$CC -O2 -w -Ibuild/gen -Ifirmware/src -Ifirmware/hal -o "$OUT/smpedit_test" tests/smpedit_test.c -lm
+run "PHREAK 1.5: the SAMPLE EDITOR's SAVE: loop / keys, trim, reverse, normalize, fades" "$OUT/smpedit_test"
+$CC -O2 -w -Ibuild/gen -Ifirmware/src -Ifirmware/hal -o "$OUT/resample_test" tests/resample_test.c -lm
+run "PHREAK 1.8: RESAMPLE: starts, stops, rates, the mix into a slot, the delay's half, the write" "$OUT/resample_test"
 $CC -O2 -w -Ibuild/gen -Ifirmware/src -o "$OUT/dsyn_test" tests/dsyn_test.c -lm
 run "SYN1..SYN4 drum kits and the editor's DRUM SYNTH commands (v10)" "$OUT/dsyn_test"
 $CC -O2 -w -Ibuild/gen -Ifirmware/src -o "$OUT/font_test" tests/font_test.c
