@@ -8648,12 +8648,56 @@ function kitZip() {
 
 async function smpInfo() { dev.smp = parse[CMD.SMP_INFO](await rq(req.smpInfo())); }
 
+/* An embedded iOS MIDI browser may suppress window.confirm() and return false
+   without showing anything. A DOM dialog preserves the overwrite warning and
+   makes the send action possible in a WebKit Web MIDI wrapper. */
+function confirmSampleUpload(k) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    const msg = t("confirmUpload").replace("{n}", k + 1);
+    dlg.setAttribute("aria-label", msg);
+    dlg.style.cssText = "box-sizing:border-box;width:min(420px,calc(100vw - 32px));max-width:100%;padding:24px;border:1px solid #777;border-radius:8px;background:#111;color:#fff;";
+    const form = document.createElement("form");
+    form.method = "dialog";
+    const p = document.createElement("p");
+    p.textContent = msg;
+    p.style.margin = "0 0 20px";
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:12px;justify-content:flex-end;flex-wrap:wrap;";
+    const cancel = document.createElement("button");
+    cancel.type = "submit";
+    cancel.value = "cancel";
+    cancel.textContent = t("previewCancel");
+    const upload = document.createElement("button");
+    upload.type = "submit";
+    upload.value = "upload";
+    upload.className = "pri";
+    upload.textContent = t("smpSendTo").replace("{n}", k + 1);
+    actions.append(cancel, upload);
+    form.append(p, actions);
+    dlg.append(form);
+    dlg.addEventListener("close", () => {
+      const accepted = dlg.returnValue === "upload";
+      dlg.remove();
+      resolve(accepted);
+    }, { once: true });
+    document.body.append(dlg);
+    try { dlg.showModal(); }
+    catch (e) {
+      dlg.remove();
+      console.error("Cannot show sample upload confirmation", e);
+      sayK("smpFail", "confirmation dialog unavailable");
+      resolve(false);
+    }
+  });
+}
+
 async function smpUpload(k, prog, ask = true, d = smpDraft[k]) {   /* (d: the DRUM KIT page's own, not the Samples draft) */
   let built, done = false;
   try { built = buildSlot(d.name, d.files.map((f) => ({ s: withGain(f.s, f.gain), root: f.root, lo: f.lo, hi: f.hi,
     loop: f.loop || 0, ls: f.ls, le: f.le, rate: f.rate }))); }
   catch (e) { sayK("smpFail", e.message); return false; }
-  if (ask && !confirm(t("confirmUpload").replace("{n}", k + 1))) return false;
+  if (ask && !await confirmSampleUpload(k)) return false;
   const { hdr, data } = built;
   busy++;
   smpBusy = true;
@@ -8662,23 +8706,27 @@ async function smpUpload(k, prog, ask = true, d = smpDraft[k]) {   /* (d: the DR
   if (!prog || !prog.isConnected)                   /* (the Samples page was drawn again just now: its new bar) */
     prog = $("smpslots").querySelector(`[data-k="${k}"] progress[max="1"]`) || { value: 0, hidden: true };
   prog.hidden = false;
+  let stage = "SMP_BEGIN";
   try {
     const t0 = performance.now();
     let r = parse[CMD.SMP_BEGIN](await rq(req.smpBegin(k), { timeout: 1000, retries: 0 }));
     if (r.rc) throw new Error("begin rc " + r.rc);
     for (let off = 0; off < data.length; off += 256) {
       const a = SMP.DATA_OFF + off;
+      stage = `SMP_WRITE +${off} / ${data.length}`;
       const w = parse[CMD.SMP_WRITE](await rq(req.smpWrite(k, a, data.subarray(off, off + 256)), { timeout: 1000, retries: 1 }));
       if (w.rc) throw new Error(`write at 0x${a.toString(16)} rc ${w.rc}`);
       prog.value = (off + 256) / data.length;
       sayK("smpUploading", `${k + 1}  ${kib(Math.min(data.length, off + 256))} / ${kib(data.length)} KiB`);
     }
+    stage = "SMP_END";
     r = parse[CMD.SMP_END](await rq(req.smpEnd(k, hdr), { timeout: 2000, retries: 0 }));
     if (r.rc) throw new Error(`end rc ${r.rc} (${SMP_RC[r.rc] || "?"})`);
     sayK("smpDone", `${k + 1}  ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     done = true;
   } catch (e) {
-    if (e.message !== "closed") sayK("smpFail", e.message);
+    console.error(`Sample upload USR${k + 1} failed at ${stage}`, e);
+    if (e.message !== "closed") sayK("smpFail", `${stage}: ${e.message}`);
   } finally {
     try { if (dev) await smpInfo(); } catch (e) { /* shown by the next action */ }
     smpBusy = false;
