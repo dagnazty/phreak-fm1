@@ -1,0 +1,66 @@
+# The PHREAK site on GitHub Pages (https://dagnazty.github.io/phreak-fm1/): the web installer, the editor at
+# webapp/editor/, and the latest release's firmware. Built from web/ (web/make_site.py) and the .fwsc attached to the
+# latest published release, so no toolchain is needed here.
+#
+# Runs when web/ changes on main, when the Release workflow finishes, and by hand (Actions -> Pages -> Run workflow).
+# Needs the repository's Settings -> Pages -> Source set to "GitHub Actions", and at least one published release.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/pages.yml"]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The latest release's firmware
+        id: fw
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)"
+          [ -n "$TAG" ] || { echo "no published release yet: run the Release workflow first (a tag v1.9, or publish ticked)"; exit 1; }
+          V="${TAG#v}"
+          mkdir -p build
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "phreak-$V.fwsc" --dir build --clobber
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "firmware: $TAG (build/phreak-$V.fwsc)"
+
+      - name: Build the site
+        run: python3 web/make_site.py "build/phreak-${{ steps.fw.outputs.version }}.fwsc" "${{ steps.fw.outputs.version }}" build/site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

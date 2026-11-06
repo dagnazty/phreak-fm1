@@ -360,6 +360,8 @@ git tag v1.9 && git push sloop v1.9
 
 Or run it by hand from the repository's **Actions → Release → Run workflow** with a version: that makes a draft release unless *publish* is ticked.
 
+[.github/workflows/pages.yml](.github/workflows/pages.yml) puts the site on GitHub Pages, [dagnazty.github.io/phreak-fm1](https://dagnazty.github.io/phreak-fm1/): the installer, with the editor at `webapp/editor/`. It builds the site from `web/` and the latest published release's firmware (no toolchain), and runs when `web/` changes on `main`, after each release, or by hand (**Actions → Pages**). The repository's **Settings → Pages → Source** must be **GitHub Actions**.
+
 The boot logo comes from [tools/gen_phreak_logo.py](tools/gen_phreak_logo.py) (`--assets DIR` writes the PNGs used here).
 
 ## Credits

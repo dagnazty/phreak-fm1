@@ -1,5 +1,6 @@
 # Build a PHREAK release: the firmware package (build/phreak-X.Y.fwsc, identity FM-1_9XY) and the web site (the
-# installer and the editor), checked, then published as a GitHub release.
+# installer and the editor), checked, then published as a GitHub release. The site on GitHub Pages is its own workflow
+# (pages.yml): it runs when this one finishes and takes the release's firmware.
 #
 #   Push a tag:     git tag v1.9 && git push sloop v1.9        -> release "PHREAK 1.9"
 #   Or by hand:     Actions -> Release -> Run workflow, version 1.9 (a draft release unless "publish" is ticked)
@@ -24,6 +25,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   AC79_SDK_COMMIT: d179b4484759423312073f5fbb232501aa491047   # AC79NN_SDK_V1.2.1_2023-12-13
